@@ -23,6 +23,12 @@
     },
     "web": {
       "favicon": "./assets/icon.png"
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "97f5e3bc-b920-4d46-8dd8-11ef5be3543d"
+      }
+    },
+    "owner": "haritzeizagirre"
   }
 }
