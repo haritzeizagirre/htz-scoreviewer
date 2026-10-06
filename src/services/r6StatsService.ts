@@ -41,6 +41,17 @@ function normalizeTeamKey(name: string): string[] {
 
   const slug = slugify(clean);
   if (slug && !keys.includes(slug)) keys.push(slug);
+
+  // Variantes quitando/añadiendo sufijos y prefijos habituales
+  // (p. ej. "Team BDS" -> "bds", "Wolves Esports" -> "wolves")
+  const stripped = slug
+    .replace(/-(esports|gaming|team|e-sports|esport|club|academy)$/, '')
+    .replace(/^(team|club)-/, '');
+  if (stripped && !keys.includes(stripped)) keys.push(stripped);
+  if (slug && !slug.startsWith('team-') && !keys.includes(`team-${slug}`)) {
+    keys.push(`team-${slug}`);
+  }
+
   return keys;
 }
 
@@ -198,6 +209,43 @@ function extractArrayAfter(text: string, needle: string, fromIndex = 0): { json:
 }
 
 /**
+ * Extrae un objeto JSON balanceado cuyo primer carácter '{' está justo después
+ * de `needle` (needle debe terminar en '{').
+ */
+function extractObjectAfter(text: string, needle: string, fromIndex = 0): { json: string; end: number } | null {
+  const idx = text.indexOf(needle, fromIndex);
+  if (idx === -1) return null;
+  const start = idx + needle.length - 1;
+  if (text[start] !== '{') return null;
+
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (esc) {
+      esc = false;
+      continue;
+    }
+    if (ch === '\\') {
+      esc = true;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = !inStr;
+      continue;
+    }
+    if (inStr) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return { json: text.substring(start, i + 1), end: i + 1 };
+    }
+  }
+  return null;
+}
+
+/**
  * Recupera el payload RSC (React Flight) de Next.js concatenando los pushes de __next_f
  */
 function extractRscPayload(html: string): string {
@@ -345,27 +393,29 @@ function parseGezzlyMatchHtml(
     }
   }
 
-  // 4. Stats de jugadores: parejas de arrays (home, away) con kills/deaths
+  // 4. Stats de jugadores: objetos "stats":{ state, home:{players}, away:{players} }.
+  //    El primero es el cómputo global; los siguientes, por mapa (en orden).
+  //    (Gezzly cambió el formato: ya no hay arrays "players" con kills sueltos.)
   const statsPairs: { home: RawR6Player[]; away: RawR6Player[] }[] = [];
-  let pendingHome: RawR6Player[] | null = null;
-  let playersPos = 0;
+  let statsPos = 0;
   while (true) {
-    const found = extractArrayAfter(payload, '"players":[', playersPos);
+    const found = extractObjectAfter(payload, '"stats":{', statsPos);
     if (!found) break;
-    playersPos = found.end;
+    statsPos = found.end;
     try {
-      const arr = JSON.parse(found.json);
-      if (!Array.isArray(arr) || arr.length === 0) continue;
-      const hasStats = arr[0] && typeof arr[0] === 'object' && 'kills' in arr[0] && 'deaths' in arr[0];
-      if (!hasStats) continue;
-      if (pendingHome === null) {
-        pendingHome = arr;
-      } else {
-        statsPairs.push({ home: pendingHome, away: arr });
-        pendingHome = null;
+      const obj = JSON.parse(found.json);
+      const home = Array.isArray(obj?.home?.players) ? (obj.home.players as RawR6Player[]) : null;
+      const away = Array.isArray(obj?.away?.players) ? (obj.away.players as RawR6Player[]) : null;
+      const hasStats =
+        !!home &&
+        !!away &&
+        home.length > 0 &&
+        ('kills' in home[0] || 'deaths' in home[0]);
+      if (hasStats) {
+        statsPairs.push({ home, away });
       }
     } catch {
-      // Array no parseable, continuar
+      // stats no parseable, continuar
     }
   }
 
