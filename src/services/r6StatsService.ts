@@ -112,7 +112,9 @@ async function findMatchUrl(
             const candidate = `https://www.gezzly.gg/match/${a}-${b}-${dateStr}`;
             try {
               const html = await fetchGezzlyHtml(candidate);
-              if (html && !/404|not found/i.test(html.slice(0, 400))) {
+              // Gezzly responde 200 incluso en URLs inexistentes ("soft 404"),
+              // con <title>Match Not Found - Gezzly</title>. Hay que descartarlo.
+              if (html && !/Match Not Found/i.test(html)) {
                 return candidate;
               }
             } catch {
@@ -520,6 +522,11 @@ export const R6StatsService = {
 
       const html = await fetchGezzlyHtml(targetUrl);
       const parsedData = parseGezzlyMatchHtml(html, targetUrl, teamA, teamB);
+
+      // Si Gezzly devolvió su página "Match Not Found", no hay datos.
+      if (parsedData.matchTitle && /Match Not Found/i.test(parsedData.matchTitle)) {
+        return null;
+      }
 
       if (parsedData.maps.length > 0 || parsedData.vetoRows.length > 0 || parsedData.matchTitle) {
         // Solo cachear si el encuentro ha finalizado por completo para no congelar datos en directo
