@@ -167,7 +167,7 @@ const BOTTOM_TABS: { id: MainTab; label: string; Icon: React.ComponentType<{ siz
   { id: 'api', label: 'APIs', Icon: Key },
 ];
 
-export const ScoreViewerApp: React.FC<SubAppProps> = ({ onExitToHub, storage }) => {
+export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   const insets = useSafeAreaInsets();
   const [activeTab, setActiveTab] = useState<MainTab>('scores');
   const [matches, setMatches] = useState<Match[]>([]);
@@ -689,15 +689,8 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ onExitToHub, storage }) 
 
   return (
     <View style={styles.container}>
-      {/* Top Header: chevron + título (1 línea) + refrescar */}
+      {/* Top Header: título (1 línea) + refrescar */}
       <View style={styles.header}>
-        <HtzButton
-          variant="secondary"
-          size="sm"
-          icon={<ChevronLeft size={18} color={htzTokens.colors.onSurface} />}
-          onPress={onExitToHub}
-        />
-
         <Text style={styles.appTitle} numberOfLines={1} ellipsizeMode="tail">
           Score Viewer Pro
         </Text>

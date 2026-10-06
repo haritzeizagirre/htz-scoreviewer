@@ -9,6 +9,7 @@ import {
   Image,
   Linking,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   Trophy,
   MapPin,
@@ -65,6 +66,9 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
   onSelectTournament,
 }) => {
   const [activeTab, setActiveTab] = useState<string>(defaultTabForGame(match?.game));
+  // El modal es full-screen y queda fuera del SafeAreaView, así que respetamos
+  // el notch/barra de estado manualmente para que el header no se solape.
+  const insets = useSafeAreaInsets();
 
   // Al abrir un partido, mostrar siempre primero la pestaña de estadísticas
   // (o el calendario/eventos en los juegos que no tienen stats).
@@ -142,7 +146,7 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
     >
       <View style={styles.fullScreenPage}>
         {/* Header Superior: Barra de navegación completa */}
-        <View style={styles.topAppBar}>
+        <View style={[styles.topAppBar, { paddingTop: insets.top + 10 }]}>
           <TouchableOpacity
             onPress={onClose}
             style={styles.backButton}
