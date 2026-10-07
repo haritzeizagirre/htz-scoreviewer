@@ -24,6 +24,8 @@ export interface HtzButtonProps {
   onPress?: () => void;
   style?: StyleProp<ViewStyle>;
   textStyle?: StyleProp<TextStyle>;
+  /** Nombre anunciado por lectores de pantalla (obligatorio si no hay texto). */
+  accessibilityLabel?: string;
 }
 
 export const HtzButton: React.FC<HtzButtonProps> = ({
@@ -36,6 +38,7 @@ export const HtzButton: React.FC<HtzButtonProps> = ({
   onPress,
   style,
   textStyle,
+  accessibilityLabel,
 }) => {
   const getButtonStyles = (): StyleProp<ViewStyle>[] => {
     const list: StyleProp<ViewStyle>[] = [styles.base];
@@ -103,6 +106,8 @@ export const HtzButton: React.FC<HtzButtonProps> = ({
       style={getButtonStyles()}
       disabled={disabled || loading}
       onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
     >
       {loading ? (
         <ActivityIndicator

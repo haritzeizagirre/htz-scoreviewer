@@ -4,7 +4,6 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  Alert,
   TouchableOpacity,
 } from 'react-native';
 import { Plus, Trash2, Star, Trophy, Shield, Check } from 'lucide-react-native';
@@ -65,14 +64,17 @@ export const FavoritesManagerView: React.FC<FavoritesManagerViewProps> = ({
 }) => {
   const [teamInput, setTeamInput] = useState('');
   const [activeTab, setActiveTab] = useState<'teams' | 'tournaments'>('teams');
+  // Mensaje inline (en web Alert.alert no muestra nada).
+  const [addNotice, setAddNotice] = useState<string | null>(null);
 
   const handleAddTeam = (nameToAdd?: string) => {
     const target = (nameToAdd || teamInput).trim();
     if (!target) return;
     if (favoriteTeams.some((t) => t.toLowerCase() === target.toLowerCase())) {
-      Alert.alert('Ya añadido', `El equipo "${target}" ya está en tus favoritos.`);
+      setAddNotice(`El equipo "${target}" ya está en tus favoritos.`);
       return;
     }
+    setAddNotice(null);
     const updated = [...favoriteTeams, target];
     onUpdateTeams(updated);
     if (!nameToAdd) setTeamInput('');
@@ -137,7 +139,10 @@ export const FavoritesManagerView: React.FC<FavoritesManagerViewProps> = ({
                 <HtzInput
                   placeholder="Escribe el nombre o siglas..."
                   value={teamInput}
-                  onChangeText={setTeamInput}
+                  onChangeText={(txt) => {
+                    setTeamInput(txt);
+                    if (addNotice) setAddNotice(null);
+                  }}
                   onSubmitEditing={() => handleAddTeam()}
                 />
               </View>
@@ -146,8 +151,10 @@ export const FavoritesManagerView: React.FC<FavoritesManagerViewProps> = ({
                 icon={<Plus size={20} color="#FFFFFF" />}
                 onPress={() => handleAddTeam()}
                 style={styles.addBtn}
+                accessibilityLabel="Añadir equipo a favoritos"
               />
             </View>
+            {addNotice && <Text style={styles.addNotice}>{addNotice}</Text>}
 
             {/* Quick Suggestions */}
             <Text style={styles.sectionHeader}>Sugerencias Rápidas Populares</Text>
@@ -196,6 +203,7 @@ export const FavoritesManagerView: React.FC<FavoritesManagerViewProps> = ({
                       size="sm"
                       icon={<Trash2 size={16} color={htzTokens.colors.error} />}
                       onPress={() => handleRemoveTeam(team)}
+                      accessibilityLabel={`Eliminar ${team} de favoritos`}
                     />
                   </View>
                 ))
@@ -299,6 +307,12 @@ const styles = StyleSheet.create({
     width: 44,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  addNotice: {
+    color: '#FBBF24',
+    fontSize: 12,
+    marginTop: -6,
+    marginBottom: 10,
   },
   suggestionsWrapper: {
     flexDirection: 'row',

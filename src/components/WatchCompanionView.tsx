@@ -1,12 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
   StyleSheet,
-  TouchableOpacity,
   TextInput,
   ScrollView,
-  Alert,
+  Platform,
 } from 'react-native';
 import {
   Watch,
@@ -33,15 +32,25 @@ import { htzTokens } from './htz/tokens';
 interface WatchCompanionViewProps {
   config: Gtr3ConfigState;
   onUpdateConfig: (newConfig: Gtr3ConfigState) => void;
+  /** Feedback global (toast) para confirmaciones; en web Alert.alert no existe. */
+  onNotify?: (message: string) => void;
 }
 
 export const WatchCompanionView: React.FC<WatchCompanionViewProps> = ({
   config,
   onUpdateConfig,
+  onNotify,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'config' | 'guide' | 'preview'>('config');
   const [copied, setCopied] = useState(false);
   const [expandedStep, setExpandedStep] = useState<number | null>(1);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
 
   const steps = Gtr3SyncService.getInstallationSteps();
 
@@ -56,13 +65,20 @@ export const WatchCompanionView: React.FC<WatchCompanionViewProps> = ({
     onUpdateConfig(updated);
   };
 
-  const handleCopyCode = () => {
+  const handleCopyCode = async () => {
+    // Copiar de verdad en web; en nativo se mantiene el feedback visual (sin
+    // dependencia extra de portapapeles).
+    if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(codeContent);
+      } catch {
+        // Permiso denegado o contexto no seguro: el usuario aún puede copiar a mano.
+      }
+    }
     setCopied(true);
-    setTimeout(() => setCopied(false), 2500);
-    Alert.alert(
-      'Configuración Lista para GTR 3',
-      'El código ha sido preparado. Puedes copiarlo o guardarlo para tu archivo score-tracker-gtr3/app-side/config.js.'
-    );
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = setTimeout(() => setCopied(false), 2500);
+    onNotify?.('Configuración lista para el GTR 3. Código generado y copiado al portapapeles.');
   };
 
   const codeContent = Gtr3SyncService.generateConfigFileContent(config);

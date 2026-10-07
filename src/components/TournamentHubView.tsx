@@ -30,6 +30,7 @@ import { TournamentLogo } from './TournamentLogo';
 import { MarqueeText } from './MarqueeText';
 import { HtzCard, HtzChip, HtzButton } from './htz';
 import { htzTokens } from './htz/tokens';
+import { OnlineSearchBanner, OnlineSearchStatus } from './OnlineSearchBanner';
 
 interface TournamentHubViewProps {
   favoriteTournaments: string[];
@@ -46,7 +47,7 @@ const SPORT_OPTIONS: { id: 'TODOS' | SportCategory; label: string }[] = [
   { id: 'VALORANT', label: 'Valorant' },
   { id: 'LOL', label: 'LoL' },
   { id: 'CS2', label: 'CS2' },
-  { id: 'R6', label: 'R6' },
+  { id: 'R6', label: 'R6 Siege' },
   { id: 'DOTA2', label: 'Dota 2' },
 ];
 
@@ -55,11 +56,53 @@ export const TournamentHubView: React.FC<TournamentHubViewProps> = ({
   onToggleTournamentFavorite,
   onSelectTournament,
   enabledGames,
+  pandaToken,
+  footballToken,
 }) => {
   const [sportFilter, setSportFilter] = useState<'TODOS' | SportCategory>('TODOS');
   const [searchQuery, setSearchQuery] = useState('');
   const [tierFilter, setTierFilter] = useState<'TODOS' | TournamentTier>('TODOS');
   const [regionFilter, setRegionFilter] = useState<'TODOS' | MatchRegion>('TODOS');
+
+  // Búsqueda online (mismo comportamiento que en Explorar)
+  const [searchingOnline, setSearchingOnline] = useState(false);
+  const [onlineTournaments, setOnlineTournaments] = useState<TournamentItem[]>([]);
+  const [onlineSearchStatus, setOnlineSearchStatus] = useState<OnlineSearchStatus>('idle');
+  const [onlineSearchCount, setOnlineSearchCount] = useState(0);
+
+  const resetOnlineSearch = () => {
+    setOnlineTournaments([]);
+    setOnlineSearchStatus('idle');
+    setOnlineSearchCount(0);
+  };
+
+  const handleSearchOnline = async () => {
+    if (!searchQuery.trim() || searchingOnline) return;
+
+    const hasPanda = Boolean(pandaToken?.trim());
+    const hasFootball = Boolean(footballToken?.trim());
+    if (!hasPanda && !hasFootball) {
+      setOnlineTournaments([]);
+      setOnlineSearchCount(0);
+      setOnlineSearchStatus('no-token');
+      return;
+    }
+
+    setSearchingOnline(true);
+    setOnlineSearchStatus('idle');
+    try {
+      const res = await ScoreService.searchOnlineTournaments(searchQuery, pandaToken, footballToken);
+      setOnlineTournaments(res);
+      setOnlineSearchCount(res.length);
+      setOnlineSearchStatus(res.length > 0 ? 'results' : 'empty');
+    } catch (err) {
+      console.warn('Error en búsqueda online (Torneos):', err);
+      setOnlineSearchCount(0);
+      setOnlineSearchStatus('empty');
+    } finally {
+      setSearchingOnline(false);
+    }
+  };
 
   // Filtrar deportes disponibles según enabledGames
   const availableSports = useMemo(() => {
@@ -85,11 +128,25 @@ export const TournamentHubView: React.FC<TournamentHubViewProps> = ({
       region: regionFilter,
       favorites: favoriteTournaments,
     });
+    // Fusionar los resultados de la búsqueda online evitando duplicados.
+    if (onlineTournaments.length > 0) {
+      for (const ot of onlineTournaments) {
+        const otId = (ot.id || '').toLowerCase();
+        const otName = (ot.name || '').toLowerCase().trim();
+        const exists = list.some(
+          (t) =>
+            (t.id && t.id.toLowerCase() === otId) ||
+            (ot.leagueId && t.leagueId && t.leagueId === ot.leagueId) ||
+            (t.game === ot.game && t.name.toLowerCase().trim() === otName)
+        );
+        if (!exists) list.push(ot);
+      }
+    }
     if (enabledGames) {
       return list.filter((t) => isGameCategoryEnabled(t.game, enabledGames));
     }
     return list;
-  }, [searchQuery, sportFilter, tierFilter, regionFilter, favoriteTournaments, enabledGames]);
+  }, [searchQuery, sportFilter, tierFilter, regionFilter, favoriteTournaments, enabledGames, onlineTournaments]);
 
   const favTournaments = useMemo(() => {
     return allTournaments.filter((t) =>
@@ -106,6 +163,15 @@ export const TournamentHubView: React.FC<TournamentHubViewProps> = ({
         !ScoreService.isTournamentItemFavorite(t, favoriteTournaments)
     );
   }, [allTournaments, favoriteTournaments]);
+
+  // Catálogo de descubrimiento: sin búsqueda se ocultan los favoritos (ya tienen su
+  // propia sección) para no repetir tarjetas; al buscar se muestran todos los resultados.
+  const catalogTournaments = useMemo(() => {
+    if (searchQuery.trim()) return allTournaments;
+    return allTournaments.filter(
+      (t) => !ScoreService.isTournamentItemFavorite(t, favoriteTournaments)
+    );
+  }, [allTournaments, favoriteTournaments, searchQuery]);
 
   const renderTournamentCard = (item: TournamentItem) => {
     const isFav = ScoreService.isTournamentItemFavorite(item, favoriteTournaments);
@@ -190,6 +256,12 @@ export const TournamentHubView: React.FC<TournamentHubViewProps> = ({
                 style={[styles.favBtn, isFav && styles.favBtnActive]}
                 onPress={() => onToggleTournamentFavorite(item)}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  isFav
+                    ? `Quitar ${item.name} de favoritos`
+                    : `Añadir ${item.name} a favoritos`
+                }
               >
                 <Star
                   size={16}
@@ -216,15 +288,25 @@ export const TournamentHubView: React.FC<TournamentHubViewProps> = ({
             placeholder="Buscar torneo (Champions, LaLiga, VCT, LEC, Major...)"
             placeholderTextColor={htzTokens.colors.outline}
             value={searchQuery}
-            onChangeText={setSearchQuery}
+            onChangeText={(txt) => {
+              setSearchQuery(txt);
+              if (onlineTournaments.length > 0 || onlineSearchStatus !== 'idle') {
+                resetOnlineSearch();
+              }
+            }}
             autoCorrect={false}
             autoCapitalize="none"
             returnKeyType="search"
           />
           {searchQuery.length > 0 && (
             <TouchableOpacity
-              onPress={() => setSearchQuery('')}
+              onPress={() => {
+                setSearchQuery('');
+                resetOnlineSearch();
+              }}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              accessibilityRole="button"
+              accessibilityLabel="Limpiar búsqueda"
             >
               <X size={16} color={htzTokens.colors.outline} />
             </TouchableOpacity>
@@ -276,6 +358,15 @@ export const TournamentHubView: React.FC<TournamentHubViewProps> = ({
         contentContainerStyle={styles.mainScrollContent}
         showsVerticalScrollIndicator={false}
       >
+        {/* Búsqueda online (misma que en Explorar) */}
+        <OnlineSearchBanner
+          query={searchQuery}
+          searching={searchingOnline}
+          status={onlineSearchStatus}
+          count={onlineSearchCount}
+          onPress={handleSearchOnline}
+        />
+
         {/* SECCIÓN 1: MIS TORNEOS FAVORITOS */}
         {favTournaments.length > 0 && !searchQuery.trim() && (
           <View style={styles.sectionBlock}>
@@ -304,34 +395,36 @@ export const TournamentHubView: React.FC<TournamentHubViewProps> = ({
           </View>
         )}
 
-        {/* SECCIÓN 3: TODOS LOS TORNEOS */}
-        <View style={styles.sectionBlock}>
-          <View style={styles.sectionHeaderRow}>
-            <Trophy size={14} color={htzTokens.colors.primary} />
-            <Text style={styles.sectionTitle}>
-              {searchQuery.trim()
-                ? `Resultados de "${searchQuery}"`
-                : sportFilter !== 'TODOS'
-                ? `Torneos de ${sportFilter}`
-                : 'Todas las Competiciones'}
-            </Text>
-            <Text style={styles.sectionCount}>({allTournaments.length})</Text>
-          </View>
-
-          {allTournaments.length > 0 ? (
-            <View style={styles.cardsStack}>
-              {allTournaments.map(renderTournamentCard)}
-            </View>
-          ) : (
-            <HtzCard style={styles.emptyCard}>
-              <Trophy size={28} color={htzTokens.colors.outline} />
-              <Text style={styles.emptyTitle}>No se encontraron torneos</Text>
-              <Text style={styles.emptySubtitle}>
-                Prueba a cambiar los filtros o el término de búsqueda para ver más resultados.
+        {/* SECCIÓN 3: CATÁLOGO DE DESCUBRIMIENTO / RESULTADOS DE BÚSQUEDA */}
+        {(searchQuery.trim() || catalogTournaments.length > 0) && (
+          <View style={styles.sectionBlock}>
+            <View style={styles.sectionHeaderRow}>
+              <Trophy size={14} color={htzTokens.colors.primary} />
+              <Text style={styles.sectionTitle}>
+                {searchQuery.trim()
+                  ? `Resultados de "${searchQuery}"`
+                  : sportFilter !== 'TODOS'
+                  ? `Más torneos de ${sportFilter}`
+                  : 'Más Competiciones'}
               </Text>
-            </HtzCard>
-          )}
-        </View>
+              <Text style={styles.sectionCount}>({catalogTournaments.length})</Text>
+            </View>
+
+            {catalogTournaments.length > 0 ? (
+              <View style={styles.cardsStack}>
+                {catalogTournaments.map(renderTournamentCard)}
+              </View>
+            ) : (
+              <HtzCard style={styles.emptyCard}>
+                <Trophy size={28} color={htzTokens.colors.outline} />
+                <Text style={styles.emptyTitle}>No se encontraron torneos</Text>
+                <Text style={styles.emptySubtitle}>
+                  Prueba a cambiar los filtros o el término de búsqueda para ver más resultados.
+                </Text>
+              </HtzCard>
+            )}
+          </View>
+        )}
 
         <View style={{ height: 32 }} />
       </ScrollView>

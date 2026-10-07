@@ -24,6 +24,9 @@ import { ScoreService, areTeamsMatching } from './scoreService';
 const MEMORY_CACHE = new Map<string, { data: TournamentFullDetail; timestamp: number }>();
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutos para datos en directo
 const STORAGE_PREFIX = 'sv_tourn_detail_real_v14_';
+// Caducidad de la caché persistida del detalle de torneo (12 h): evita mostrar
+// clasificaciones o partidos viejos indefinidamente entre versiones de la clave.
+const STORAGE_DETAIL_TTL_MS = 12 * 60 * 60 * 1000;
 
 // Caché para resolución dinámica de series (evita llamadas API redundantes de búsqueda)
 const SERIES_RESOLUTION_CACHE = new Map<
@@ -2139,15 +2142,33 @@ export const TournamentService = {
     try {
       const stored = await AsyncStorage.getItem(STORAGE_PREFIX + key);
       if (stored) {
-        const parsed = JSON.parse(stored) as TournamentFullDetail;
-        baseDetail = {
-          ...baseDetail,
-          ...parsed,
-          bracket: parsed.bracket || baseDetail.bracket,
-          standings: (parsed.standings && parsed.standings.length > 0) ? parsed.standings : baseDetail.standings,
-          stages: (parsed.stages && parsed.stages.length > 0) ? parsed.stages : baseDetail.stages,
-          participants: (parsed.participants && parsed.participants.length > 0) ? parsed.participants : baseDetail.participants,
-        };
+        const rawParsed = JSON.parse(stored) as
+          | TournamentFullDetail
+          | { ts?: number; data?: TournamentFullDetail };
+        // Formato nuevo: { ts, data } con caducidad. Formato antiguo: detalle plano
+        // (se acepta como válido y se reescribirá con ts en el próximo guardado).
+        const isWrapped =
+          typeof rawParsed === 'object' && rawParsed !== null && 'data' in rawParsed;
+        const storedTs = isWrapped ? (rawParsed as { ts?: number }).ts : undefined;
+        const isExpired = typeof storedTs === 'number' && now - storedTs > STORAGE_DETAIL_TTL_MS;
+
+        if (isExpired) {
+          AsyncStorage.removeItem(STORAGE_PREFIX + key).catch(() => {});
+        } else {
+          const parsed = (isWrapped
+            ? (rawParsed as { data?: TournamentFullDetail }).data
+            : rawParsed) as TournamentFullDetail | undefined;
+          if (parsed) {
+            baseDetail = {
+              ...baseDetail,
+              ...parsed,
+              bracket: parsed.bracket || baseDetail.bracket,
+              standings: (parsed.standings && parsed.standings.length > 0) ? parsed.standings : baseDetail.standings,
+              stages: (parsed.stages && parsed.stages.length > 0) ? parsed.stages : baseDetail.stages,
+              participants: (parsed.participants && parsed.participants.length > 0) ? parsed.participants : baseDetail.participants,
+            };
+          }
+        }
       }
     } catch (e) {
       console.warn('Error leyendo storage de torneo:', e);
@@ -2252,7 +2273,7 @@ export const TournamentService = {
     // 5. Persistir en caché L1 y L2
     MEMORY_CACHE.set(key, { data: baseDetail, timestamp: now });
     try {
-      AsyncStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(baseDetail)).catch(() => {});
+      AsyncStorage.setItem(STORAGE_PREFIX + key, JSON.stringify({ ts: Date.now(), data: baseDetail })).catch(() => {});
     } catch {}
 
     return baseDetail;

@@ -6,7 +6,6 @@ import {
   ScrollView,
   RefreshControl,
   ActivityIndicator,
-  Alert,
   TouchableOpacity,
   BackHandler,
   Platform,
@@ -36,6 +35,8 @@ import {
   Gamepad2,
   X,
   RotateCcw,
+  Eye,
+  EyeOff,
 } from 'lucide-react-native';
 import { SubAppProps } from './types';
 import {
@@ -46,6 +47,7 @@ import {
   MatchRegion,
   TournamentItem,
   TeamCatalogItem,
+  MatchSourceStatus,
 } from './services/types';
 import { ScoreService, isGameCategoryEnabled } from './services/scoreService';
 import { MatchGroup } from './components/MatchGroup';
@@ -126,6 +128,25 @@ const STATUS_EMPTY_SUBTITLES: Record<MatchStatus, string> = {
   UPCOMING: 'No hay partidos programados de tus equipos o torneos favoritos en los próximos días.',
   FINISHED: 'No hay partidos finalizados recientes de tus equipos o torneos favoritos.',
 };
+
+/** "hace X" legible para el indicador de última actualización. */
+function formatRelativeTime(ts: number): string {
+  const diffMs = Date.now() - ts;
+  if (diffMs < 15_000) return 'ahora mismo';
+  const sec = Math.floor(diffMs / 1000);
+  if (sec < 60) return `hace ${sec} s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `hace ${min} min`;
+  const hours = Math.floor(min / 60);
+  return `hace ${hours} h`;
+}
+
+/** Descripción del estado de una fuente para lectores de pantalla. */
+function describeSource(s: MatchSourceStatus): string {
+  if (s.state === 'ok') return `${s.count} partidos`;
+  if (s.state === 'error') return 'error de conexión';
+  return s.reason === 'no-token' ? 'sin token' : 'desactivado';
+}
 
 /**
  * Agrupa los partidos por torneo (liga) conservando el orden de aparición, de modo
@@ -231,6 +252,37 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     maxMatches: 15,
   });
 
+  // Borradores locales de los tokens de la pestaña APIs. Se editan aquí y solo se
+  // aplican a la configuración (y relanzan peticiones) al pulsar "Guardar y Aplicar Claves".
+  const [pandaTokenDraft, setPandaTokenDraft] = useState('');
+  const [footballTokenDraft, setFootballTokenDraft] = useState('');
+  const [showPandaToken, setShowPandaToken] = useState(false);
+  const [showFootballToken, setShowFootballToken] = useState(false);
+
+  // Toast/snackbar propio: react-native-web no implementa Alert.alert (es un no-op).
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = useCallback((message: string) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToast(message);
+    toastTimerRef.current = setTimeout(() => setToast(null), 3000);
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    };
+  }, []);
+
+  // Indicador de frescura: cuándo se actualizó y estado de cada fuente consultada.
+  const [sourceStatus, setSourceStatus] = useState<MatchSourceStatus[]>([]);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState(0);
+  // Fuerza un re-render periódico para refrescar el "hace X".
+  const [, setClockTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setClockTick((v) => v + 1), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+
   // Modales
   const [gamesModalVisible, setGamesModalVisible] = useState(false);
   const [filterModalVisible, setFilterModalVisible] = useState(false);
@@ -241,6 +293,12 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   const activeFiltersCount =
     (tierFilter !== 'TODOS' ? 1 : 0) +
     (regionFilter !== 'TODOS' ? 1 : 0);
+
+  // ¿Hay algún token de API configurado? Si no, los estados vacíos lo explican y
+  // ofrecen un acceso directo a la pestaña APIs.
+  const hasAnyApiToken = Boolean(
+    watchConfig.pandaToken.trim() || watchConfig.footballToken.trim()
+  );
 
   // Auto-reset del filtro de deporte si el seleccionado queda desactivado
   useEffect(() => {
@@ -341,6 +399,9 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
         };
 
         setWatchConfig((prev) => ({ ...prev, ...nextConfig }));
+        // Los campos de token de la pestaña APIs se editan sobre borradores locales.
+        setPandaTokenDraft(storedConfig.pandaToken || '');
+        setFootballTokenDraft(storedConfig.footballToken || '');
         await storage.set('watch_config', nextConfig);
       } catch (err) {
         console.warn('Error loading storage:', err);
@@ -351,22 +412,32 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     })();
   }, []);
 
+  // Última configuración aplicada. loadMatches lo lee de aquí para no depender del
+  // objeto watchConfig: así teclear en los campos de token ya no relanza peticiones.
+  const configRef = useRef(watchConfig);
+  useEffect(() => {
+    configRef.current = watchConfig;
+  }, [watchConfig]);
+
   // Fetch matches
-  const loadMatches = useCallback(async (forceRefresh = false) => {
+  const loadMatches = useCallback(async (forceRefresh = false, configOverride?: Gtr3ConfigState) => {
+    const cfg = configOverride ?? configRef.current;
     const requestSeq = ++requestSeqRef.current;
     try {
-      const data = await ScoreService.fetchAllMatches({
-        pandaToken: watchConfig.pandaToken,
-        footballToken: watchConfig.footballToken,
-        favoriteTeams: watchConfig.favoriteTeams,
-        favoriteTournaments: watchConfig.favoriteTournaments,
-        enabledGames: watchConfig.enabledGames,
+      const { matches: data, sources } = await ScoreService.fetchAllMatchesWithStatus({
+        pandaToken: cfg.pandaToken,
+        footballToken: cfg.footballToken,
+        favoriteTeams: cfg.favoriteTeams,
+        favoriteTournaments: cfg.favoriteTournaments,
+        enabledGames: cfg.enabledGames,
         forceRefresh,
       });
       // Si mientras tanto se ha lanzado otra petición (p. ej. con la configuración
       // ya cargada), se descarta esta respuesta para no pisar datos más frescos.
       if (requestSeq !== requestSeqRef.current) return;
       lastLoadAtRef.current = Date.now();
+      setLastUpdatedAt(lastLoadAtRef.current);
+      setSourceStatus(sources);
       setMatches(data);
     } catch (err) {
       if (requestSeq !== requestSeqRef.current) return;
@@ -377,14 +448,31 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
         setRefreshing(false);
       }
     }
-  }, [watchConfig]);
+  }, []);
 
-  // Primera carga: se espera a tener la configuración persistida para lanzar una
-  // única petición con los tokens y favoritos reales del usuario.
+  // Clave estable de lo que sí afecta a los partidos (favoritos y juegos activos).
+  // Los tokens quedan fuera a propósito: se aplican al guardar y no al teclear.
+  const matchesConfigKey = JSON.stringify({
+    teams: watchConfig.favoriteTeams,
+    tournaments: watchConfig.favoriteTournaments,
+    enabledGames: watchConfig.enabledGames,
+  });
+
+  // Primera carga y recargas por cambios de favoritos/juegos. Las ráfagas de
+  // cambios (varios toggles seguidos) se agrupan con un pequeño debounce para no
+  // lanzar una descarga completa por cada uno.
+  const reloadDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (!configReady) return;
-    loadMatches();
-  }, [configReady, loadMatches]);
+    if (reloadDebounceRef.current) clearTimeout(reloadDebounceRef.current);
+    reloadDebounceRef.current = setTimeout(() => {
+      reloadDebounceRef.current = null;
+      loadMatches();
+    }, 600);
+    return () => {
+      if (reloadDebounceRef.current) clearTimeout(reloadDebounceRef.current);
+    };
+  }, [configReady, matchesConfigKey, loadMatches]);
 
   // Al volver a la app desde segundo plano, se recargan los datos automáticamente
   // (salvo que se acaben de actualizar hace menos de un minuto).
@@ -406,20 +494,27 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   };
 
   const handleUpdateConfig = async (newConfig: Gtr3ConfigState) => {
+    configRef.current = newConfig;
     setWatchConfig(newConfig);
     await storage.set('watch_config', newConfig);
   };
 
   const handleToggleTournament = async (tournament: TournamentItem | string) => {
-    const updated = ScoreService.toggleTournamentFavorite(watchConfig.favoriteTournaments, tournament);
-    const newConfig = { ...watchConfig, favoriteTournaments: updated };
+    // Se parte de la última configuración aplicada (no del render) para que
+    // varios toggles rápidos seguidos no se pisen entre sí.
+    const base = configRef.current;
+    const updated = ScoreService.toggleTournamentFavorite(base.favoriteTournaments, tournament);
+    const newConfig = { ...base, favoriteTournaments: updated };
+    configRef.current = newConfig;
     setWatchConfig(newConfig);
     await storage.set('watch_config', newConfig);
   };
 
   const handleToggleTeam = async (team: TeamCatalogItem | string) => {
-    const updated = ScoreService.toggleTeamFavorite(watchConfig.favoriteTeams, team);
-    const newConfig = { ...watchConfig, favoriteTeams: updated };
+    const base = configRef.current;
+    const updated = ScoreService.toggleTeamFavorite(base.favoriteTeams, team);
+    const newConfig = { ...base, favoriteTeams: updated };
+    configRef.current = newConfig;
     setWatchConfig(newConfig);
     await storage.set('watch_config', newConfig);
   };
@@ -533,12 +628,14 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   };
 
   const handleToggleGame = async (gameKey: string) => {
-    const currentVal = watchConfig.enabledGames[gameKey] !== false;
+    const base = configRef.current;
+    const currentVal = base.enabledGames[gameKey] !== false;
     const newEnabled = {
-      ...watchConfig.enabledGames,
+      ...base.enabledGames,
       [gameKey]: !currentVal,
     };
-    const newConfig = { ...watchConfig, enabledGames: newEnabled };
+    const newConfig = { ...base, enabledGames: newEnabled };
+    configRef.current = newConfig;
     setWatchConfig(newConfig);
     await storage.set('watch_config', newConfig);
   };
@@ -576,7 +673,8 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
         rocket_league: false,
       };
     }
-    const newConfig = { ...watchConfig, enabledGames: newEnabled };
+    const newConfig = { ...configRef.current, enabledGames: newEnabled };
+    configRef.current = newConfig;
     setWatchConfig(newConfig);
     await storage.set('watch_config', newConfig);
   };
@@ -586,7 +684,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     setTestingPanda(true);
     setPandaTestResult(null);
     try {
-      const result = await ScoreService.testPandaScore(watchConfig.pandaToken || '');
+      const result = await ScoreService.testPandaScore(pandaTokenDraft.trim());
       setPandaTestResult(result);
     } catch (err: any) {
       setPandaTestResult({ success: false, message: err.message || 'Error inesperado' });
@@ -600,7 +698,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     setTestingFootball(true);
     setFootballTestResult(null);
     try {
-      const result = await ScoreService.testFootball(watchConfig.footballToken || '');
+      const result = await ScoreService.testFootball(footballTokenDraft.trim());
       setFootballTestResult(result);
     } catch (err: any) {
       setFootballTestResult({ success: false, message: err.message || 'Error inesperado' });
@@ -780,6 +878,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
             size="sm"
             onPress={onRefresh}
             disabled={refreshing}
+            accessibilityLabel="Actualizar partidos"
             icon={
               refreshing ? (
                 <ActivityIndicator size="small" color={htzTokens.colors.primary} />
@@ -810,6 +909,43 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
         <>
           {activeTab === 'scores' && (
             <View style={styles.mainScoresContainer}>
+          {/* Indicador de frescura: última actualización + estado de fuentes */}
+          {lastUpdatedAt > 0 && (
+            <View style={styles.updateStatusBar}>
+              <Text style={styles.updateStatusText}>
+                {refreshing ? 'Actualizando…' : `Actualizado ${formatRelativeTime(lastUpdatedAt)}`}
+              </Text>
+              <View style={styles.sourceStatusList}>
+                {sourceStatus.map((s) => (
+                  <View
+                    key={s.id}
+                    style={styles.sourceStatusItem}
+                    accessibilityLabel={`${s.label}: ${describeSource(s)}`}
+                  >
+                    <View
+                      style={[
+                        styles.sourceDot,
+                        s.state === 'ok'
+                          ? styles.sourceDotOk
+                          : s.state === 'error'
+                          ? styles.sourceDotError
+                          : styles.sourceDotSkipped,
+                      ]}
+                    />
+                    <Text
+                      style={[
+                        styles.sourceStatusLabel,
+                        s.state === 'skipped' && styles.sourceStatusLabelMuted,
+                      ]}
+                    >
+                      {s.label}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+
           {/* Panel plegable: filtros de deporte, nivel y región */}
           <View style={styles.filtersPanel}>
             <TouchableOpacity
@@ -908,6 +1044,8 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
                     style={styles.rowIconBtn}
                     onPress={() => setGamesModalVisible(true)}
                     activeOpacity={0.7}
+                    accessibilityRole="button"
+                    accessibilityLabel="Gestionar deportes y juegos"
                   >
                     <Gamepad2 size={15} color={htzTokens.colors.primary} />
                   </TouchableOpacity>
@@ -1061,6 +1199,12 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
                             <Text style={styles.emptySubtitle}>
                               {STATUS_EMPTY_SUBTITLES[st]}
                             </Text>
+                            {!hasAnyApiToken && (
+                              <Text style={styles.emptyHint}>
+                                Configura tus tokens de API (PandaScore / Football-Data) para ver
+                                también partidos en línea de tus favoritos.
+                              </Text>
+                            )}
                             <View style={styles.emptyActionsRow}>
                               {(tierFilter !== 'TODOS' ||
                                 regionFilter !== 'TODOS' ||
@@ -1076,6 +1220,16 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
                                   }}
                                 >
                                   Limpiar filtros
+                                </HtzButton>
+                              )}
+                              {!hasAnyApiToken && (
+                                <HtzButton
+                                  variant="secondary"
+                                  size="sm"
+                                  icon={<Key size={13} color={htzTokens.colors.onSurface} />}
+                                  onPress={() => setActiveTab('api')}
+                                >
+                                  Configurar APIs
                                 </HtzButton>
                               )}
                               <HtzButton
@@ -1129,6 +1283,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
         <WatchCompanionView
           config={watchConfig}
           onUpdateConfig={handleUpdateConfig}
+          onNotify={showToast}
         />
       )}
 
@@ -1149,12 +1304,31 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
 
             <HtzInput
               label="Token de Acceso PandaScore:"
-              value={watchConfig.pandaToken}
+              value={pandaTokenDraft}
               onChangeText={(val) => {
-                setWatchConfig({ ...watchConfig, pandaToken: val });
+                setPandaTokenDraft(val);
                 setPandaTestResult(null);
               }}
               placeholder="Pega aquí tu clave token de PandaScore"
+              autoCapitalize="none"
+              autoCorrect={false}
+              spellCheck={false}
+              autoComplete="off"
+              secureTextEntry={!showPandaToken}
+              rightAccessory={
+                <TouchableOpacity
+                  onPress={() => setShowPandaToken((v) => !v)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  accessibilityRole="button"
+                  accessibilityLabel={showPandaToken ? 'Ocultar token de PandaScore' : 'Mostrar token de PandaScore'}
+                >
+                  {showPandaToken ? (
+                    <EyeOff size={16} color={htzTokens.colors.outline} />
+                  ) : (
+                    <Eye size={16} color={htzTokens.colors.outline} />
+                  )}
+                </TouchableOpacity>
+              }
             />
             <Text style={styles.apiHelp}>
               Obtén tu clave gratuita registrándote en pandascore.co (Plan Hobbyist).
@@ -1213,12 +1387,31 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
 
             <HtzInput
               label="Token Football-Data.org:"
-              value={watchConfig.footballToken}
+              value={footballTokenDraft}
               onChangeText={(val) => {
-                setWatchConfig({ ...watchConfig, footballToken: val });
+                setFootballTokenDraft(val);
                 setFootballTestResult(null);
               }}
               placeholder="Pega aquí tu X-Auth-Token de Football-Data"
+              autoCapitalize="none"
+              autoCorrect={false}
+              spellCheck={false}
+              autoComplete="off"
+              secureTextEntry={!showFootballToken}
+              rightAccessory={
+                <TouchableOpacity
+                  onPress={() => setShowFootballToken((v) => !v)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  accessibilityRole="button"
+                  accessibilityLabel={showFootballToken ? 'Ocultar token de Football-Data' : 'Mostrar token de Football-Data'}
+                >
+                  {showFootballToken ? (
+                    <EyeOff size={16} color={htzTokens.colors.outline} />
+                  ) : (
+                    <Eye size={16} color={htzTokens.colors.outline} />
+                  )}
+                </TouchableOpacity>
+              }
             />
             <Text style={styles.apiHelp}>
               Obtén tu clave gratuita en football-data.org para marcadores oficiales de fútbol.
@@ -1272,11 +1465,22 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
           <HtzButton
             variant="primary"
             size="md"
+            accessibilityLabel="Guardar y aplicar claves de API"
             icon={<CheckCircle2 size={18} color="#FFFFFF" />}
             onPress={async () => {
-              await storage.set('watch_config', watchConfig);
-              Alert.alert('Guardado', 'Claves guardadas. Recargando partidos en vivo...');
-              loadMatches();
+              const nextConfig: Gtr3ConfigState = {
+                ...watchConfig,
+                pandaToken: pandaTokenDraft.trim(),
+                footballToken: footballTokenDraft.trim(),
+              };
+              configRef.current = nextConfig;
+              setWatchConfig(nextConfig);
+              setPandaTokenDraft(nextConfig.pandaToken);
+              setFootballTokenDraft(nextConfig.footballToken);
+              await storage.set('watch_config', nextConfig);
+              // Aplicar ya los tokens recién guardados sin esperar al siguiente render.
+              loadMatches(true, nextConfig);
+              showToast('Claves guardadas. Recargando partidos en vivo...');
               setActiveTab('scores');
             }}
           >
@@ -1322,6 +1526,19 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
           );
         })}
       </View>
+
+      {/* Toast/snackbar global: Alert.alert es un no-op en web, así que las
+          confirmaciones se muestran aquí (cross-platform). */}
+      {toast && (
+        <View style={styles.toastWrap} pointerEvents="none">
+          <View style={styles.toast}>
+            <CheckCircle2 size={15} color={htzTokens.colors.primary} />
+            <Text style={styles.toastText} numberOfLines={2}>
+              {toast}
+            </Text>
+          </View>
+        </View>
+      )}
 
       {/* Match Detail Modal */}
       {selectedMatch && (
@@ -1472,8 +1689,87 @@ const styles = StyleSheet.create({
     color: htzTokens.colors.onSurface,
     fontWeight: '700',
   },
+  toastWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 78,
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    zIndex: 30,
+  },
+  toast: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: htzTokens.colors.surfaceContainerHigh,
+    borderWidth: 1,
+    borderColor: 'rgba(74, 124, 89, 0.45)',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    maxWidth: '96%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  toastText: {
+    color: htzTokens.colors.onSurface,
+    fontSize: 13,
+    fontWeight: '600',
+    flexShrink: 1,
+  },
   mainScoresContainer: {
     flex: 1,
+  },
+  updateStatusBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingTop: 6,
+  },
+  updateStatusText: {
+    color: htzTokens.colors.outline,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  sourceStatusList: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  sourceStatusItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  sourceDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+  },
+  sourceDotOk: {
+    backgroundColor: '#4ADE80',
+  },
+  sourceDotError: {
+    backgroundColor: '#F87171',
+  },
+  sourceDotSkipped: {
+    backgroundColor: 'rgba(255, 255, 255, 0.25)',
+  },
+  sourceStatusLabel: {
+    color: htzTokens.colors.onSurfaceVariant,
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  sourceStatusLabelMuted: {
+    color: htzTokens.colors.outline,
+    opacity: 0.7,
   },
   liveNoticeBar: {
     flexDirection: 'row',
@@ -1655,6 +1951,13 @@ const styles = StyleSheet.create({
     fontSize: 13,
     textAlign: 'center',
     paddingHorizontal: 20,
+  },
+  emptyHint: {
+    color: htzTokens.colors.primary,
+    fontSize: 12,
+    textAlign: 'center',
+    paddingHorizontal: 24,
+    marginTop: 8,
   },
   apiScroll: {
     flex: 1,

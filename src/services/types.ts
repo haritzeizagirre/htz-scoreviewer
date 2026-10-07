@@ -12,6 +12,18 @@ export type MatchRegion = 'GLOBAL' | 'EMEA' | 'AMERICAS' | 'ASIA' | 'ESPAÑA';
 
 export type MatchStatus = 'LIVE' | 'UPCOMING' | 'FINISHED';
 
+/** Estado de cada fuente consultada al cargar partidos (para el indicador de frescura). */
+export type MatchSourceState = 'ok' | 'error' | 'skipped';
+
+export interface MatchSourceStatus {
+  id: 'vlr' | 'pandascore' | 'football';
+  label: string;
+  state: MatchSourceState;
+  count: number;
+  /** Motivo cuando la fuente se omite: sin token o juego desactivado. */
+  reason?: 'no-token' | 'disabled';
+}
+
 export interface PlayerInfo {
   id?: string | number;
   name: string;

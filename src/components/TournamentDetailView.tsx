@@ -313,6 +313,17 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
   const upcomingMatches = (detail.matches || []).filter((m) => m.status === 'UPCOMING').sort(byStartAsc);
   const finishedMatches = (detail.matches || []).filter((m) => m.status === 'FINISHED').sort(byStartDesc);
 
+  // Nº de equipos del torneo: el mayor dato disponible entre participantes con ficha
+  // y la clasificación real. Evita que la cabecera contradiga a la tabla (p. ej.
+  // LaLiga: 20 equipos en la clasificación frente a 8 participantes con ficha).
+  const teamCount = Math.max(
+    detail.participants?.length || 0,
+    (detail.standings || []).reduce(
+      (max, group) => Math.max(max, group.table?.length || 0),
+      0
+    )
+  );
+
   return (
     <View style={styles.container}>
       {/* Top Header con botón Atrás y Favorito */}
@@ -326,6 +337,12 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
           style={[styles.favBtn, isFavorite && styles.favBtnActive]}
           onPress={() => onToggleFavorite(tournament)}
           activeOpacity={0.7}
+          accessibilityRole="button"
+          accessibilityLabel={
+            isFavorite
+              ? `Quitar ${tournament.name} de favoritos`
+              : `Añadir ${tournament.name} a favoritos`
+          }
         >
           <Star
             size={18}
@@ -414,7 +431,7 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
             <View style={styles.metricDivider} />
             <View style={styles.metricItem}>
               <Text style={styles.metricLabel}>Equipos</Text>
-              <Text style={styles.metricValue}>{detail.participants?.length || 0}</Text>
+              <Text style={styles.metricValue}>{teamCount}</Text>
             </View>
             {detail.prizePool ? (
               <>

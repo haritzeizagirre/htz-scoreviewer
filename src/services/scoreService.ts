@@ -13,6 +13,7 @@ import {
   TournamentItem,
   TeamCatalogItem,
   LiveRoundScore,
+  MatchSourceStatus,
 } from './types';
 import { formatMatchSchedule } from './dateUtils';
 
@@ -42,6 +43,50 @@ export function areTeamsMatching(a1: string, b1: string, a2: string, b2: string)
     (isTeamMatch(a1, a2) && isTeamMatch(b1, b2)) ||
     (isTeamMatch(a1, b2) && isTeamMatch(b1, a2))
   );
+}
+
+/**
+ * Consulta GET contra la API de PandaScore (vía proxy local en web para evitar CORS).
+ * Devuelve [] si la respuesta no es un array o si la petición falla.
+ */
+async function fetchPandaEndpoint(token: string, endpoint: string): Promise<any[]> {
+  const cleanToken = token.trim();
+  if (!cleanToken) return [];
+  const isWeb = Platform.OS === 'web';
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 4500);
+
+  // 1. En Web: ir directamente al proxy local para evitar bloqueos y timeouts de CORS del navegador
+  if (isWeb) {
+    try {
+      const proxyUrl = `/api/proxy/pandascore?token=${encodeURIComponent(cleanToken)}&path=${encodeURIComponent(endpoint)}`;
+      const res = await fetch(proxyUrl, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        const json = await res.json();
+        if (Array.isArray(json)) return json;
+      }
+    } catch (proxyErr) {
+      console.warn(`Proxy PandaScore (${endpoint}) falló:`, proxyErr);
+    }
+    return [];
+  }
+
+  // 2. En Native (Android / iOS): llamada directa de máxima velocidad (sin proxy, sin CORS)
+  try {
+    const sep = endpoint.includes('?') ? '&' : '?';
+    const url = `https://api.pandascore.co${endpoint}${sep}token=${encodeURIComponent(cleanToken)}`;
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (res.ok) {
+      const json = await res.json();
+      if (Array.isArray(json)) return json;
+    }
+  } catch (err) {
+    console.warn(`Llamada directa PandaScore (${endpoint}) falló:`, err);
+  }
+
+  return [];
 }
 
 export function isTeamFavorite(
@@ -2604,6 +2649,24 @@ export function mapFootballDataMatch(m: any): Match {
   };
 }
 
+/**
+ * Filtra una lista de partidos para quedarse solo con los de un equipo concreto
+ * del catálogo (comparación tolerante con nombres cortos y sufijos de club).
+ */
+function filterMatchesByTeam(matches: Match[], team: TeamCatalogItem): Match[] {
+  const names = [team.name, team.shortName]
+    .filter((v): v is string => Boolean(v && v.trim().length >= 3))
+    .map((v) => v.toLowerCase().trim());
+  if (names.length === 0) return [];
+
+  return matches.filter((m) => {
+    const candidates = [m.teamA.name, m.teamA.shortName, m.teamB.name, m.teamB.shortName]
+      .filter((v): v is string => Boolean(v))
+      .map((v) => v.toLowerCase().trim());
+    return names.some((n) => candidates.some((c) => isTeamMatch(n, c)));
+  });
+}
+
 export const ScoreService = {
   async fetchAllMatches(config: {
     pandaToken?: string;
@@ -2613,6 +2676,22 @@ export const ScoreService = {
     enabledGames: Record<string, boolean>;
     forceRefresh?: boolean;
   }): Promise<Match[]> {
+    const { matches } = await this.fetchAllMatchesWithStatus(config);
+    return matches;
+  },
+
+  /**
+   * Igual que fetchAllMatches, pero devuelve además el estado de cada fuente
+   * consultada (VLR, PandaScore, Football-Data) para el indicador de frescura.
+   */
+  async fetchAllMatchesWithStatus(config: {
+    pandaToken?: string;
+    footballToken?: string;
+    favoriteTeams: string[];
+    favoriteTournaments?: string[];
+    enabledGames: Record<string, boolean>;
+    forceRefresh?: boolean;
+  }): Promise<{ matches: Match[]; sources: MatchSourceStatus[] }> {
     let combined: Match[] = [];
 
     const hasPanda = Boolean(config.pandaToken && config.pandaToken.trim().length > 5);
@@ -2630,31 +2709,41 @@ export const ScoreService = {
     const footballEnabled = !config.enabledGames || config.enabledGames.football !== false;
 
     // Ejecutar todas las fuentes en paralelo sin caché para datos 100% frescos y carga ultra rápida
-    const [pandaMatches, footballMatches, vlrLiveMatches] = await Promise.all([
+    const [pandaRes, footballRes, vlrRes] = await Promise.all([
       hasPanda && esportsEnabled
         ? this.fetchPandaScore(
             config.pandaToken!,
             config.favoriteTeams,
             config.favoriteTournaments,
             config.enabledGames
-          ).catch((err) => {
-            console.warn('PandaScore API error:', err);
-            return [];
-          })
-        : Promise.resolve([]),
+          )
+            .then((matches) => ({ state: 'ok' as const, matches }))
+            .catch((err) => {
+              console.warn('PandaScore API error:', err);
+              return { state: 'error' as const, matches: [] as Match[] };
+            })
+        : Promise.resolve({ state: 'skipped' as const, matches: [] as Match[] }),
       hasFootball && footballEnabled
-        ? this.fetchFootball(config.footballToken!).catch((err) => {
-            console.warn('Football-Data API error:', err);
-            return [];
-          })
-        : Promise.resolve([]),
+        ? this.fetchFootball(config.footballToken!)
+            .then((matches) => ({ state: 'ok' as const, matches }))
+            .catch((err) => {
+              console.warn('Football-Data API error:', err);
+              return { state: 'error' as const, matches: [] as Match[] };
+            })
+        : Promise.resolve({ state: 'skipped' as const, matches: [] as Match[] }),
       valEnabled
-        ? this.fetchLiveVlrMatches().catch((err) => {
-            console.warn('VLR Live Scraper error:', err);
-            return [];
-          })
-        : Promise.resolve([]),
+        ? this.fetchLiveVlrMatches()
+            .then((matches) => ({ state: 'ok' as const, matches }))
+            .catch((err) => {
+              console.warn('VLR Live Scraper error:', err);
+              return { state: 'error' as const, matches: [] as Match[] };
+            })
+        : Promise.resolve({ state: 'skipped' as const, matches: [] as Match[] }),
     ]);
+
+    const pandaMatches = pandaRes.matches;
+    const footballMatches = footballRes.matches;
+    const vlrLiveMatches = vlrRes.matches;
 
     // Fusionar datos de marcadores de rondas en directo de VLR en los partidos de PandaScore
     const matchedVlrHrefs = new Set<string>();
@@ -2786,7 +2875,32 @@ export const ScoreService = {
       return 0;
     });
 
-    return recentTagged;
+    // Estado de cada fuente para el indicador de frescura de la cabecera.
+    const sources: MatchSourceStatus[] = [
+      {
+        id: 'vlr',
+        label: 'VLR',
+        state: vlrRes.state,
+        count: vlrLiveMatches.length,
+        reason: vlrRes.state === 'skipped' ? 'disabled' : undefined,
+      },
+      {
+        id: 'pandascore',
+        label: 'PandaScore',
+        state: pandaRes.state,
+        count: pandaMatches.length,
+        reason: pandaRes.state === 'skipped' ? (hasPanda ? 'disabled' : 'no-token') : undefined,
+      },
+      {
+        id: 'football',
+        label: 'Fútbol',
+        state: footballRes.state,
+        count: footballMatches.length,
+        reason: footballRes.state === 'skipped' ? (hasFootball ? 'disabled' : 'no-token') : undefined,
+      },
+    ];
+
+    return { matches: recentTagged, sources };
   },
 
   async fetchPandaScore(
@@ -2798,44 +2912,7 @@ export const ScoreService = {
     const cleanToken = token.trim();
     if (!cleanToken) return [];
 
-    const isWeb = Platform.OS === 'web';
-
-    const safeFetch = async (endpoint: string): Promise<any[]> => {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4500);
-
-      // 1. En Web: ir directamente al proxy local para evitar bloqueos y timeouts de CORS del navegador
-      if (isWeb) {
-        try {
-          const proxyUrl = `/api/proxy/pandascore?token=${encodeURIComponent(cleanToken)}&path=${encodeURIComponent(endpoint)}`;
-          const res = await fetch(proxyUrl, { signal: controller.signal });
-          clearTimeout(timeoutId);
-          if (res.ok) {
-            const json = await res.json();
-            if (Array.isArray(json)) return json;
-          }
-        } catch (proxyErr) {
-          console.warn(`Proxy PandaScore (${endpoint}) falló:`, proxyErr);
-        }
-        return [];
-      }
-
-      // 2. En Native (Android / iOS): llamada directa de máxima velocidad (sin proxy, sin CORS)
-      try {
-        const sep = endpoint.includes('?') ? '&' : '?';
-        const url = `https://api.pandascore.co${endpoint}${sep}token=${encodeURIComponent(cleanToken)}`;
-        const res = await fetch(url, { signal: controller.signal });
-        clearTimeout(timeoutId);
-        if (res.ok) {
-          const json = await res.json();
-          if (Array.isArray(json)) return json;
-        }
-      } catch (err) {
-        console.warn(`Llamada directa PandaScore (${endpoint}) falló:`, err);
-      }
-
-      return [];
-    };
+    const safeFetch = (endpoint: string) => fetchPandaEndpoint(cleanToken, endpoint);
 
     // Determinar qué juegos están habilitados y mapearlos a slugs de PandaScore
     const activeVideogames: string[] = [];
@@ -2917,6 +2994,15 @@ export const ScoreService = {
       validMatches.push(item);
     }
 
+    return this.mapPandaScoreItems(validMatches);
+  },
+
+  /**
+   * Convierte los partidos crudos de PandaScore al modelo Match de la app
+   * (tier, región, plantillas, streams, desglose de mapas...). Se reutiliza en
+   * la carga global y en la ficha de equipo.
+   */
+  mapPandaScoreItems(validMatches: any[]): Match[] {
     const resultMatches: Match[] = [];
     for (const item of validMatches) {
       const category = detectEsportCategory(item.videogame?.slug, item.videogame?.name);
@@ -3065,6 +3151,52 @@ export const ScoreService = {
     }
 
     return resultMatches;
+  },
+
+  /**
+   * Partidos de un equipo concreto para su ficha en el catálogo: usa PandaScore
+   * (esports) o Football-Data (fútbol) según el deporte del equipo.
+   */
+  async fetchTeamMatches(
+    team: TeamCatalogItem,
+    tokens: { pandaToken?: string; footballToken?: string }
+  ): Promise<Match[]> {
+    if (!team || !team.name) return [];
+
+    // Fútbol: descargar la ventana de partidos y filtrar por el equipo.
+    if (team.game === 'FÚTBOL') {
+      const footballToken = (tokens.footballToken || '').trim();
+      if (!footballToken) return [];
+      const all = await this.fetchFootball(footballToken);
+      return filterMatchesByTeam(all, team);
+    }
+
+    // Esports: búsqueda dirigida por nombre en PandaScore.
+    const pandaToken = (tokens.pandaToken || '').trim();
+    if (!pandaToken) return [];
+
+    const raw = await fetchPandaEndpoint(
+      pandaToken,
+      `/matches?search[name]=${encodeURIComponent(team.name.trim())}&per_page=25&sort=begin_at`
+    );
+
+    // Mismo criterio de validación que la carga global: deduplicar y descartar
+    // entradas incompletas, canceladas o con ambos equipos TBD.
+    const seen = new Set<number | string>();
+    const valid: any[] = [];
+    for (const item of raw) {
+      if (!item || !item.id || seen.has(item.id)) continue;
+      seen.add(item.id);
+      if (!item.opponents || item.opponents.length < 2) continue;
+      if (item.status === 'canceled') continue;
+      const oppA = item.opponents[0]?.opponent;
+      const oppB = item.opponents[1]?.opponent;
+      if (oppA?.name === 'TBD' && oppB?.name === 'TBD') continue;
+      valid.push(item);
+    }
+
+    const matches = this.mapPandaScoreItems(valid);
+    return filterMatchesByTeam(matches, team);
   },
 
   async fetchFootball(token: string): Promise<Match[]> {
@@ -3680,6 +3812,61 @@ export const ScoreService = {
         }
       } catch (err) {
         console.warn('Error searching PandaScore online leagues:', err);
+      }
+    }
+
+    // Football-Data.org: la API no tiene búsqueda por nombre, así que se descarga el
+    // listado de competiciones y se filtra en cliente.
+    const cleanFootball = (footballToken || '').trim();
+    if (cleanFootball) {
+      try {
+        const path = '/v4/competitions';
+        let data: any = null;
+
+        if (Platform.OS === 'web') {
+          try {
+            const proxyUrl = `/api/proxy/football?token=${encodeURIComponent(cleanFootball)}&path=${encodeURIComponent(path)}`;
+            const res = await fetch(proxyUrl);
+            if (res.ok) data = await res.json();
+          } catch {}
+        }
+
+        if (!data) {
+          const res = await fetch(`https://api.football-data.org${path}`, {
+            headers: { 'X-Auth-Token': cleanFootball, Accept: 'application/json' },
+          });
+          if (res.ok) data = await res.json();
+        }
+
+        const competitions = data && Array.isArray(data.competitions) ? data.competitions : [];
+        const qLowerComp = q.toLowerCase();
+        for (const comp of competitions) {
+          const name = (comp?.name || '').trim();
+          if (!name || !name.toLowerCase().includes(qLowerComp)) continue;
+
+          // Evitar duplicar competiciones que ya existen en el catálogo maestro.
+          if (
+            MASTER_TOURNAMENTS.some(
+              (t) => t.game === 'FÚTBOL' && t.name.toLowerCase() === name.toLowerCase()
+            )
+          ) {
+            continue;
+          }
+
+          results.push({
+            id: `football-comp-${comp.id}`,
+            name,
+            shortName: typeof comp.code === 'string' && comp.code.length <= 8 ? comp.code : undefined,
+            logo: comp.emblem || undefined,
+            game: 'FÚTBOL',
+            tier: resolveTournamentTier('FÚTBOL', name),
+            region: resolveMatchRegion('FÚTBOL', name, undefined, undefined, undefined, comp.area?.code),
+            externalId: comp.code || comp.id,
+            description: comp.area?.name ? `Competición de ${comp.area.name}` : undefined,
+          });
+        }
+      } catch (err) {
+        console.warn('Error searching Football-Data online competitions:', err);
       }
     }
 

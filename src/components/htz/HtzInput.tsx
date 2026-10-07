@@ -14,6 +14,8 @@ export interface HtzInputProps extends TextInputProps {
   label?: string;
   error?: string;
   icon?: React.ReactNode;
+  /** Elemento interactivo a la derecha del campo (p. ej. mostrar/ocultar token). */
+  rightAccessory?: React.ReactNode;
   containerStyle?: StyleProp<ViewStyle>;
 }
 
@@ -21,6 +23,7 @@ export const HtzInput: React.FC<HtzInputProps> = ({
   label,
   error,
   icon,
+  rightAccessory,
   containerStyle,
   style,
   onFocus,
@@ -53,6 +56,7 @@ export const HtzInput: React.FC<HtzInputProps> = ({
           }}
           {...props}
         />
+        {rightAccessory && <View style={styles.rightAccessory}>{rightAccessory}</View>}
       </View>
       {error && <Text style={styles.errorText}>{error}</Text>}
     </View>
@@ -88,6 +92,9 @@ const styles = StyleSheet.create({
   },
   icon: {
     marginRight: 8,
+  },
+  rightAccessory: {
+    marginLeft: 8,
   },
   input: {
     flex: 1,

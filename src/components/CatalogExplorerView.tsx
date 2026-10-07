@@ -6,7 +6,6 @@ import {
   ScrollView,
   TouchableOpacity,
   Image,
-  ActivityIndicator,
   BackHandler,
   TextInput,
 } from 'react-native';
@@ -19,7 +18,6 @@ import {
   Globe,
   SlidersHorizontal,
   ChevronRight,
-  Sparkles,
   MapPin,
 } from 'lucide-react-native';
 import {
@@ -28,11 +26,14 @@ import {
   SportCategory,
   TournamentTier,
   MatchRegion,
+  Match,
 } from '../services/types';
 import { ScoreService, isGameCategoryEnabled } from '../services/scoreService';
 import { TournamentDetailModal } from './TournamentDetailModal';
 import { TournamentLogo } from './TournamentLogo';
 import { MarqueeText } from './MarqueeText';
+import { OnlineSearchBanner, OnlineSearchStatus } from './OnlineSearchBanner';
+import { TeamDetailModal } from './TeamDetailModal';
 import {
   HtzCard,
   HtzTabs,
@@ -58,7 +59,7 @@ const SPORT_CHIPS: { id: 'TODOS' | SportCategory; label: string }[] = [
   { id: 'VALORANT', label: 'Valorant' },
   { id: 'LOL', label: 'LoL' },
   { id: 'CS2', label: 'CS2' },
-  { id: 'R6', label: 'R6' },
+  { id: 'R6', label: 'R6 Siege' },
   { id: 'DOTA2', label: 'Dota 2' },
 ];
 
@@ -98,9 +99,44 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
   const [searchingOnline, setSearchingOnline] = useState(false);
   const [onlineTournaments, setOnlineTournaments] = useState<TournamentItem[]>([]);
   const [onlineTeams, setOnlineTeams] = useState<TeamCatalogItem[]>([]);
+  // Estado de la última búsqueda online: sin tokens, sin resultados o resultados.
+  const [onlineSearchStatus, setOnlineSearchStatus] = useState<OnlineSearchStatus>('idle');
+  const [onlineSearchCount, setOnlineSearchCount] = useState(0);
+
+  const resetOnlineSearchStatus = () => {
+    setOnlineSearchStatus('idle');
+    setOnlineSearchCount(0);
+  };
 
   // Tournament drilldown modal state
   const [selectedTournament, setSelectedTournament] = useState<TournamentItem | null>(null);
+
+  // Ficha de equipo: los partidos se cargan al abrirla (desde el propio handler,
+  // para no hacer setState síncrono dentro de un efecto).
+  const [selectedTeam, setSelectedTeam] = useState<TeamCatalogItem | null>(null);
+  const [teamMatches, setTeamMatches] = useState<Match[]>([]);
+  const [teamMatchesLoading, setTeamMatchesLoading] = useState(false);
+  const teamRequestSeqRef = React.useRef(0);
+
+  const handleOpenTeam = async (team: TeamCatalogItem) => {
+    const requestSeq = ++teamRequestSeqRef.current;
+    setSelectedTeam(team);
+    setTeamMatches([]);
+    setTeamMatchesLoading(true);
+    try {
+      const res = await ScoreService.fetchTeamMatches(team, { pandaToken, footballToken });
+      if (requestSeq !== teamRequestSeqRef.current) return;
+      setTeamMatches(res);
+    } catch (err) {
+      if (requestSeq !== teamRequestSeqRef.current) return;
+      console.warn('Error cargando partidos del equipo:', err);
+      setTeamMatches([]);
+    } finally {
+      if (requestSeq === teamRequestSeqRef.current) {
+        setTeamMatchesLoading(false);
+      }
+    }
+  };
 
   // Interceptar botón atrás de Android para cerrar el modal de detalle del torneo
   React.useEffect(() => {
@@ -220,17 +256,39 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
   // Búsqueda en APIs remotas bajo demanda
   const handleSearchOnline = async () => {
     if (!searchQuery.trim() || searchingOnline) return;
+
+    const hasPanda = Boolean(pandaToken?.trim());
+    const hasFootball = Boolean(footballToken?.trim());
+    const canSearch =
+      activeCatalogTab === 'tournaments' ? hasPanda || hasFootball : hasPanda;
+
+    if (!canSearch) {
+      // Sin tokens no se puede consultar: avisar en vez de dejar la pantalla igual.
+      setOnlineTournaments([]);
+      setOnlineTeams([]);
+      setOnlineSearchCount(0);
+      setOnlineSearchStatus('no-token');
+      return;
+    }
+
     setSearchingOnline(true);
+    setOnlineSearchStatus('idle');
     try {
       if (activeCatalogTab === 'tournaments') {
         const res = await ScoreService.searchOnlineTournaments(searchQuery, pandaToken, footballToken);
         setOnlineTournaments(res);
+        setOnlineSearchCount(res.length);
+        setOnlineSearchStatus(res.length > 0 ? 'results' : 'empty');
       } else {
         const res = await ScoreService.searchOnlineTeams(searchQuery, pandaToken);
         setOnlineTeams(res);
+        setOnlineSearchCount(res.length);
+        setOnlineSearchStatus(res.length > 0 ? 'results' : 'empty');
       }
     } catch (err) {
       console.warn('Error en búsqueda online:', err);
+      setOnlineSearchCount(0);
+      setOnlineSearchStatus('empty');
     } finally {
       setSearchingOnline(false);
     }
@@ -278,13 +336,22 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
               setSearchQuery(txt);
               if (onlineTournaments.length > 0) setOnlineTournaments([]);
               if (onlineTeams.length > 0) setOnlineTeams([]);
+              resetOnlineSearchStatus();
             }}
             autoCorrect={false}
             autoCapitalize="none"
             returnKeyType="search"
           />
           {searchQuery.length > 0 && (
-            <TouchableOpacity onPress={() => setSearchQuery('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <TouchableOpacity
+              onPress={() => {
+                setSearchQuery('');
+                resetOnlineSearchStatus();
+              }}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              accessibilityRole="button"
+              accessibilityLabel="Limpiar búsqueda"
+            >
               <X size={18} color={htzTokens.colors.outline} />
             </TouchableOpacity>
           )}
@@ -296,7 +363,10 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
         <HtzTabs
           tabs={catalogTabs}
           activeTab={activeCatalogTab}
-          onChange={(id) => setActiveCatalogTab(id as any)}
+          onChange={(id) => {
+            setActiveCatalogTab(id as any);
+            resetOnlineSearchStatus();
+          }}
         />
       </View>
 
@@ -345,26 +415,14 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
 
       {/* Lista de Resultados */}
       <ScrollView style={styles.resultsList} showsVerticalScrollIndicator={false}>
-        {/* Banner de Búsqueda Online si hay término de búsqueda */}
-        {searchQuery.trim().length >= 2 && (
-          <TouchableOpacity
-            style={styles.searchOnlineBanner}
-            onPress={handleSearchOnline}
-            disabled={searchingOnline}
-            activeOpacity={0.8}
-          >
-            {searchingOnline ? (
-              <ActivityIndicator size="small" color={htzTokens.colors.primary} />
-            ) : (
-              <Sparkles size={16} color={htzTokens.colors.primary} />
-            )}
-            <Text style={styles.searchOnlineText}>
-              {searchingOnline
-                ? 'Buscando en APIs oficiales...'
-                : `¿No lo encuentras? Buscar "${searchQuery}" en APIs online`}
-            </Text>
-          </TouchableOpacity>
-        )}
+        {/* Banner de Búsqueda Online + estado de la última consulta */}
+        <OnlineSearchBanner
+          query={searchQuery}
+          searching={searchingOnline}
+          status={onlineSearchStatus}
+          count={onlineSearchCount}
+          onPress={handleSearchOnline}
+        />
 
         {/* 1. SECCIÓN DE TORNEOS */}
         {activeCatalogTab === 'tournaments' && (
@@ -440,6 +498,12 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
                     style={styles.starBtn}
                     onPress={() => onToggleTournament(tournament)}
                     hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      tournament.isFav
+                        ? `Quitar ${tournament.name} de favoritos`
+                        : `Añadir ${tournament.name} a favoritos`
+                    }
                   >
                     <Star
                       size={22}
@@ -467,7 +531,13 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
             {displayedTeams.length > 0 ? (
               displayedTeams.map((team) => (
                 <HtzCard key={team.id} style={styles.itemCard}>
-                  <View style={styles.cardMainClickable}>
+                  <TouchableOpacity
+                    style={styles.cardMainClickable}
+                    onPress={() => handleOpenTeam(team)}
+                    activeOpacity={0.75}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Ver ficha de ${team.name}`}
+                  >
                     {/* Logo / Escudo */}
                     <View style={styles.itemLogoBox}>
                       {team.logo ? (
@@ -508,13 +578,19 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
                         )}
                       </View>
                     </View>
-                  </View>
+                  </TouchableOpacity>
 
                   {/* Botón Estrella Favorito */}
                   <TouchableOpacity
                     style={styles.starBtn}
                     onPress={() => onToggleTeam(team)}
                     hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      team.isFav
+                        ? `Quitar ${team.name} de favoritos`
+                        : `Añadir ${team.name} a favoritos`
+                    }
                   >
                     <Star
                       size={22}
@@ -555,6 +631,26 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
           pandaToken={pandaToken}
           footballToken={footballToken}
           favoriteTeams={favoriteTeams}
+        />
+      )}
+
+      {/* Ficha de Equipo con sus partidos recientes/próximos */}
+      {selectedTeam && (
+        <TeamDetailModal
+          team={selectedTeam}
+          visible={!!selectedTeam}
+          onClose={() => setSelectedTeam(null)}
+          isFavorite={ScoreService.isTeamFavorite(
+            selectedTeam.name,
+            selectedTeam.shortName,
+            favoriteTeams,
+            selectedTeam.id
+          )}
+          onToggleFavorite={onToggleTeam}
+          matches={teamMatches}
+          loading={teamMatchesLoading}
+          hasPandaToken={Boolean(pandaToken?.trim())}
+          hasFootballToken={Boolean(footballToken?.trim())}
         />
       )}
     </View>
@@ -605,24 +701,6 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 16,
     paddingTop: 12,
-  },
-  searchOnlineBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: 'rgba(74, 124, 89, 0.15)',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(74, 124, 89, 0.35)',
-    marginBottom: 12,
-  },
-  searchOnlineText: {
-    color: htzTokens.colors.primary,
-    fontSize: 12,
-    fontWeight: '700',
   },
   cardsContainer: {
     gap: 10,
