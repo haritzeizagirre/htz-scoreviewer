@@ -252,6 +252,9 @@ export const FavoritesManagerView: React.FC<FavoritesManagerViewProps> = ({
                         isSelected && styles.checkboxActive,
                       ]}
                     >
+                      {/* Fondo montado ya opaco (evita el bug de Android con
+                          borderRadius al pasar de transparente a opaco, RN#52415). */}
+                      {isSelected && <View style={styles.checkboxBg} />}
                       {isSelected && <Star size={12} color="#FFFFFF" fill="#FFFFFF" />}
                     </View>
                   </TouchableOpacity>
@@ -363,7 +366,15 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   checkboxActive: {
-    backgroundColor: htzTokens.colors.primary,
     borderColor: htzTokens.colors.primary,
+  },
+  checkboxBg: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 6,
+    backgroundColor: htzTokens.colors.primary,
   },
 });

@@ -25,10 +25,9 @@ import {
   MatchRegion,
 } from '../services/types';
 import { ScoreService, isGameCategoryEnabled } from '../services/scoreService';
-import { GameLogo } from './GameLogo';
 import { TournamentLogo } from './TournamentLogo';
 import { MarqueeText } from './MarqueeText';
-import { HtzCard, HtzChip, HtzButton } from './htz';
+import { HtzCard, HtzChip, HtzButton, HtzSportChip } from './htz';
 import { htzTokens } from './htz/tokens';
 import { OnlineSearchBanner, OnlineSearchStatus } from './OnlineSearchBanner';
 
@@ -253,7 +252,7 @@ export const TournamentHubView: React.FC<TournamentHubViewProps> = ({
             {/* Actions: Favorite Star & Chevron */}
             <View style={styles.cardRightCol}>
               <TouchableOpacity
-                style={[styles.favBtn, isFav && styles.favBtnActive]}
+                style={styles.favBtn}
                 onPress={() => onToggleTournamentFavorite(item)}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                 accessibilityRole="button"
@@ -263,6 +262,9 @@ export const TournamentHubView: React.FC<TournamentHubViewProps> = ({
                     : `Añadir ${item.name} a favoritos`
                 }
               >
+                {/* Fondo montado ya opaco (evita el bug de Android con
+                    borderRadius al pasar de transparente a opaco, RN#52415). */}
+                {isFav && <View style={styles.favBtnBg} />}
                 <Star
                   size={16}
                   color={isFav ? '#FBBF24' : htzTokens.colors.outline}
@@ -321,34 +323,15 @@ export const TournamentHubView: React.FC<TournamentHubViewProps> = ({
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.sportsScroll}
         >
-          {availableSports.map((sport) => {
-            const isSelected = sportFilter === sport.id;
-            return (
-              <TouchableOpacity
-                key={sport.id}
-                style={[styles.sportChip, isSelected && styles.sportChipSelected]}
-                onPress={() => setSportFilter(sport.id)}
-                activeOpacity={0.7}
-              >
-                {sport.id === 'TODOS' ? (
-                  <Trophy
-                    size={13}
-                    color={isSelected ? '#ffffff' : htzTokens.colors.outline}
-                  />
-                ) : (
-                  <GameLogo game={sport.id} size={14} />
-                )}
-                <Text
-                  style={[
-                    styles.sportChipText,
-                    isSelected && styles.sportChipTextSelected,
-                  ]}
-                >
-                  {sport.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
+          {availableSports.map((sport) => (
+            <HtzSportChip
+              key={sport.id}
+              id={sport.id}
+              label={sport.label}
+              selected={sportFilter === sport.id}
+              onPress={() => setSportFilter(sport.id)}
+            />
+          ))}
         </ScrollView>
       </View>
 
@@ -467,29 +450,6 @@ const styles = StyleSheet.create({
   sportsScroll: {
     paddingHorizontal: 16,
     gap: 8,
-  },
-  sportChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: htzTokens.colors.surface,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: htzTokens.colors.outlineVariant,
-  },
-  sportChipSelected: {
-    backgroundColor: htzTokens.colors.primary,
-    borderColor: htzTokens.colors.primary,
-  },
-  sportChipText: {
-    color: htzTokens.colors.outline,
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  sportChipTextSelected: {
-    color: '#FFFFFF',
   },
   mainScroll: {
     flex: 1,
@@ -642,7 +602,13 @@ const styles = StyleSheet.create({
     padding: 6,
     borderRadius: 6,
   },
-  favBtnActive: {
+  favBtnBg: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 6,
     backgroundColor: 'rgba(251, 191, 36, 0.12)',
   },
   emptyCard: {

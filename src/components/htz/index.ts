@@ -2,6 +2,7 @@ export * from './tokens';
 export * from './HtzButton';
 export * from './HtzCard';
 export * from './HtzChip';
+export * from './HtzSportChip';
 export * from './HtzBadge';
 export * from './HtzToggle';
 export * from './HtzInput';

@@ -55,7 +55,6 @@ import { MatchDetailModal } from './components/MatchDetailModal';
 import { GameManagementModal } from './components/GameManagementModal';
 import { WatchCompanionView } from './components/WatchCompanionView';
 import { CatalogExplorerView } from './components/CatalogExplorerView';
-import { GameLogo } from './components/GameLogo';
 import { TournamentHubView } from './components/TournamentHubView';
 import { TournamentDetailView } from './components/TournamentDetailView';
 import {
@@ -69,6 +68,7 @@ import {
   HtzButton,
   HtzCard,
   HtzInput,
+  HtzSportChip,
   htzTokens,
 } from './components/htz';
 
@@ -189,9 +189,26 @@ const BOTTOM_TABS: { id: MainTab; label: string; Icon: React.ComponentType<{ siz
   { id: 'api', label: 'APIs', Icon: Key },
 ];
 
+// Vistas de pestaña memoizadas: al cambiar de pestaña (o cualquier otro estado
+// del contenedor) React reutiliza su árbol en lugar de volver a renderizarlo.
+const MemoTournamentHubView = React.memo(TournamentHubView);
+const MemoCatalogExplorerView = React.memo(CatalogExplorerView);
+const MemoWatchCompanionView = React.memo(WatchCompanionView);
+const MemoMatchGroup = React.memo(MatchGroup);
+
 export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   const insets = useSafeAreaInsets();
   const [activeTab, setActiveTab] = useState<MainTab>('scores');
+  // Pestañas ya montadas: una vez visitadas (o precargadas en segundo plano) se
+  // mantienen montadas y se ocultan con display:none. Volver a ellas es inmediato
+  // porque no se reconstruye su árbol de vistas.
+  const [mountedTabs, setMountedTabs] = useState<Record<MainTab, boolean>>({
+    scores: true,
+    tournaments: false,
+    explore: false,
+    watch: false,
+    api: false,
+  });
   const [matches, setMatches] = useState<Match[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -277,7 +294,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   const [sourceStatus, setSourceStatus] = useState<MatchSourceStatus[]>([]);
   const [lastUpdatedAt, setLastUpdatedAt] = useState(0);
   // Fuerza un re-render periódico para refrescar el "hace X".
-  const [, setClockTick] = useState(0);
+  const [clockTick, setClockTick] = useState(0);
   useEffect(() => {
     const timer = setInterval(() => setClockTick((v) => v + 1), 30_000);
     return () => clearInterval(timer);
@@ -412,6 +429,31 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     })();
   }, []);
 
+  // Marca como montada una pestaña la primera vez que se visita. Se hace en el
+  // propio manejador (y en la precarga) para no provocar renders en cascada.
+  const navigateToTab = useCallback((id: MainTab) => {
+    setSelectedTournament(null);
+    setActiveTab(id);
+    setMountedTabs((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
+  }, []);
+
+  // Precarga en segundo plano las dos pestañas más pesadas (Torneos y Explorar)
+  // poco después del arranque: así el primer cambio a ellas también es inmediato.
+  useEffect(() => {
+    if (!configReady) return;
+    const timers = [
+      setTimeout(
+        () => setMountedTabs((prev) => (prev.tournaments ? prev : { ...prev, tournaments: true })),
+        900
+      ),
+      setTimeout(
+        () => setMountedTabs((prev) => (prev.explore ? prev : { ...prev, explore: true })),
+        2000
+      ),
+    ];
+    return () => timers.forEach(clearTimeout);
+  }, [configReady]);
+
   // Última configuración aplicada. loadMatches lo lee de aquí para no depender del
   // objeto watchConfig: así teclear en los campos de token ya no relanza peticiones.
   const configRef = useRef(watchConfig);
@@ -488,18 +530,18 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     return () => subscription.remove();
   }, [loadMatches]);
 
-  const onRefresh = () => {
+  const onRefresh = useCallback(() => {
     setRefreshing(true);
     loadMatches(true); // bypass cache on manual refresh
-  };
+  }, [loadMatches]);
 
-  const handleUpdateConfig = async (newConfig: Gtr3ConfigState) => {
+  const handleUpdateConfig = useCallback(async (newConfig: Gtr3ConfigState) => {
     configRef.current = newConfig;
     setWatchConfig(newConfig);
     await storage.set('watch_config', newConfig);
-  };
+  }, [storage]);
 
-  const handleToggleTournament = async (tournament: TournamentItem | string) => {
+  const handleToggleTournament = useCallback(async (tournament: TournamentItem | string) => {
     // Se parte de la última configuración aplicada (no del render) para que
     // varios toggles rápidos seguidos no se pisen entre sí.
     const base = configRef.current;
@@ -508,18 +550,26 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     configRef.current = newConfig;
     setWatchConfig(newConfig);
     await storage.set('watch_config', newConfig);
-  };
+  }, [storage]);
 
-  const handleToggleTeam = async (team: TeamCatalogItem | string) => {
+  const handleToggleTeam = useCallback(async (team: TeamCatalogItem | string) => {
     const base = configRef.current;
     const updated = ScoreService.toggleTeamFavorite(base.favoriteTeams, team);
     const newConfig = { ...base, favoriteTeams: updated };
     configRef.current = newConfig;
     setWatchConfig(newConfig);
     await storage.set('watch_config', newConfig);
-  };
+  }, [storage]);
 
-  const handleOpenTournamentByLeague = (
+  const handleSelectTournament = useCallback((t: TournamentItem) => {
+    setSelectedTournament(t);
+  }, []);
+
+  const handleSelectMatch = useCallback((m: Match) => {
+    setSelectedMatch(m);
+  }, []);
+
+  const handleOpenTournamentByLeague = useCallback((
     leagueName: string,
     game?: SportCategory,
     masterTournamentId?: string,
@@ -625,9 +675,9 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
       ...(seriesId !== undefined && seriesId !== null ? { pinnedSeriesId: seriesId } : {}),
     };
     setSelectedTournament(dynTournament);
-  };
+  }, []);
 
-  const handleToggleGame = async (gameKey: string) => {
+  const handleToggleGame = useCallback(async (gameKey: string) => {
     const base = configRef.current;
     const currentVal = base.enabledGames[gameKey] !== false;
     const newEnabled = {
@@ -638,9 +688,9 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     configRef.current = newConfig;
     setWatchConfig(newConfig);
     await storage.set('watch_config', newConfig);
-  };
+  }, [storage]);
 
-  const handleSetGamePreset = async (preset: 'all' | 'esports' | 'football') => {
+  const handleSetGamePreset = useCallback(async (preset: 'all' | 'esports' | 'football') => {
     let newEnabled: Record<string, boolean> = {};
     if (preset === 'all') {
       newEnabled = {
@@ -677,7 +727,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     configRef.current = newConfig;
     setWatchConfig(newConfig);
     await storage.set('watch_config', newConfig);
-  };
+  }, [storage]);
 
   // Run PandaScore diagnostic test
   const handleTestPanda = async () => {
@@ -763,6 +813,26 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     };
   }, [matches, matchesActiveFilters]);
 
+  // Secciones de cada página (favoritos + grupos por torneo) memoizadas: mantienen
+  // la identidad de sus arrays entre renders, de modo que los MatchGroup
+  // memoizados no se vuelven a renderizar al cambiar de pestaña ni con otros
+  // cambios de estado del contenedor.
+  const sectionsByStatus = React.useMemo<
+    Record<MatchStatus, { favorite: Match[]; groups: { key: string; matches: Match[] }[] }>
+  >(() => {
+    const result = {} as Record<
+      MatchStatus,
+      { favorite: Match[]; groups: { key: string; matches: Match[] }[] }
+    >;
+    (Object.keys(matchesByStatus) as MatchStatus[]).forEach((st) => {
+      const pageMatches = matchesByStatus[st];
+      const favorite = pageMatches.filter((m) => m.teamA.isFav || m.teamB.isFav);
+      const other = pageMatches.filter((m) => !(m.teamA.isFav || m.teamB.isFav));
+      result[st] = { favorite, groups: groupMatchesByLeague(other) };
+    });
+    return result;
+  }, [matchesByStatus]);
+
   // Páginas disponibles ordenadas de pasado a futuro: Finalizados | En Directo | Próximos.
   // La página de En Directo solo existe cuando hay algún partido jugándose ahora mismo.
   const statusPages = React.useMemo<MatchStatus[]>(() => {
@@ -814,28 +884,28 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   // El usuario cambia de página pulsando una de las indicaciones laterales.
   // El salto de página lo hace el efecto de sincronización (instantáneo: un salto animado
   // entraría en conflicto con el gesto de deslizamiento y con el scroll-snap en web).
-  const handleSelectStatusTab = (st: MatchStatus) => {
+  const handleSelectStatusTab = useCallback((st: MatchStatus) => {
     if (st === statusTab) return;
     autoFollowStatusRef.current = false;
     setStatusTab(st);
-  };
+  }, [statusTab]);
 
   // Un gesto del usuario siempre empieza desde la posición de reposo actual
-  const handlePagerTouchStart = () => {
+  const handlePagerTouchStart = useCallback(() => {
     anchorXRef.current = lastScrollXRef.current;
     lastScrollTimeRef.current = Date.now();
-  };
+  }, []);
 
-  const handlePagerScrollBeginDrag = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+  const handlePagerScrollBeginDrag = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const x = e.nativeEvent.contentOffset.x;
     anchorXRef.current = x;
     lastScrollXRef.current = x;
     lastScrollTimeRef.current = Date.now();
-  };
+  }, []);
 
   // El usuario cambia de página deslizando horizontalmente.
   // Se usa onScroll (y no momentum) porque es el que se dispara también con rueda/trackpad.
-  const handlePagerScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+  const handlePagerScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const now = Date.now();
     const rawX = e.nativeEvent.contentOffset.x;
 
@@ -861,7 +931,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     autoFollowStatusRef.current = false;
     suppressPagerSyncRef.current = true;
     setStatusTab(st);
-  };
+  }, [pageWidth, statusPages, statusTab]);
 
 
   return (
@@ -890,25 +960,17 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
         </View>
       </View>
 
-      {/* TAB CONTENT */}
-      {selectedTournament ? (
-        <TournamentDetailView
-          tournament={selectedTournament}
-          onBack={() => setSelectedTournament(null)}
-          isFavorite={ScoreService.isTournamentItemFavorite(
-            selectedTournament,
-            watchConfig.favoriteTournaments
-          )}
-          onToggleFavorite={handleToggleTournament}
-          pandaToken={watchConfig.pandaToken}
-          footballToken={watchConfig.footballToken}
-          favoriteTeams={watchConfig.favoriteTeams}
-          onSelectMatchExternal={(m) => setSelectedMatch(m)}
-        />
-      ) : (
-        <>
-          {activeTab === 'scores' && (
-            <View style={styles.mainScoresContainer}>
+      {/* TAB CONTENT: cada pestaña se monta una vez y, cuando no está activa, se
+          oculta con display:none. Volver a una pestaña ya visitada es inmediato
+          porque no se reconstruye su árbol de vistas. */}
+      <View style={styles.tabContent}>
+        <View
+          style={[
+            styles.tabPane,
+            (selectedTournament || activeTab !== 'scores') && styles.tabPaneHidden,
+          ]}
+        >
+          <View style={styles.mainScoresContainer}>
           {/* Indicador de frescura: última actualización + estado de fuentes */}
           {lastUpdatedAt > 0 && (
             <View style={styles.updateStatusBar}>
@@ -976,37 +1038,15 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
                   style={styles.sportsScrollView}
                   contentContainerStyle={styles.sportsScrollContent}
                 >
-                  {availableSports.map((sport) => {
-                    const isSelected = sportFilter === sport.id;
-                    return (
-                      <TouchableOpacity
-                        key={sport.id}
-                        style={[
-                          styles.sportChip,
-                          isSelected && styles.sportChipSelected,
-                        ]}
-                        onPress={() => setSportFilter(sport.id)}
-                        activeOpacity={0.7}
-                      >
-                        {sport.id === 'TODOS' ? (
-                          <Trophy
-                            size={13}
-                            color={isSelected ? '#ffffff' : htzTokens.colors.outline}
-                          />
-                        ) : (
-                          <GameLogo game={sport.id} size={14} />
-                        )}
-                        <Text
-                          style={[
-                            styles.sportChipText,
-                            isSelected && styles.sportChipTextSelected,
-                          ]}
-                        >
-                          {sport.label}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
+                  {availableSports.map((sport) => (
+                    <HtzSportChip
+                      key={sport.id}
+                      id={sport.id}
+                      label={sport.label}
+                      selected={sportFilter === sport.id}
+                      onPress={() => setSportFilter(sport.id)}
+                    />
+                  ))}
 
                   {/* Visual Divider */}
                   <View style={styles.filterDivider} />
@@ -1146,12 +1186,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
                   const pageMatches = matchesByStatus[st];
                   // Los partidos de equipos favoritos se muestran en una sección fija
                   // arriba del todo y no se repiten dentro de sus torneos.
-                  const favoriteTeamMatches = pageMatches.filter(
-                    (m) => m.teamA.isFav || m.teamB.isFav
-                  );
-                  const otherMatches = pageMatches.filter(
-                    (m) => !(m.teamA.isFav || m.teamB.isFav)
-                  );
+                  const pageSections = sectionsByStatus[st];
                   return (
                     <View
                       key={st}
@@ -1175,19 +1210,19 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
                       >
                         {pageMatches.length > 0 ? (
                           <>
-                            {favoriteTeamMatches.length > 0 && (
-                              <MatchGroup
+                            {pageSections.favorite.length > 0 && (
+                              <MemoMatchGroup
                                 key="__favorite_teams__"
-                                matches={favoriteTeamMatches}
+                                matches={pageSections.favorite}
                                 variant="favorites"
-                                onSelectMatch={(m) => setSelectedMatch(m)}
+                                onSelectMatch={handleSelectMatch}
                               />
                             )}
-                            {groupMatchesByLeague(otherMatches).map((group) => (
-                              <MatchGroup
+                            {pageSections.groups.map((group) => (
+                              <MemoMatchGroup
                                 key={group.key}
                                 matches={group.matches}
-                                onSelectMatch={(m) => setSelectedMatch(m)}
+                                onSelectMatch={handleSelectMatch}
                                 onSelectTournament={handleOpenTournamentByLeague}
                               />
                             ))}
@@ -1227,7 +1262,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
                                   variant="secondary"
                                   size="sm"
                                   icon={<Key size={13} color={htzTokens.colors.onSurface} />}
-                                  onPress={() => setActiveTab('api')}
+                                  onPress={() => navigateToTab('api')}
                                 >
                                   Configurar APIs
                                 </HtzButton>
@@ -1236,7 +1271,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
                                 variant="primary"
                                 size="sm"
                                 icon={<Compass size={14} color="#000000" />}
-                                onPress={() => setActiveTab('explore')}
+                                onPress={() => navigateToTab('explore')}
                               >
                                 Explorar Catálogo
                               </HtzButton>
@@ -1251,44 +1286,68 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
             </View>
           )}
         </View>
-      )}
+        </View>
 
-      {/* TAB 2: PÁGINA Y CATÁLOGO DE TORNEOS */}
-      {activeTab === 'tournaments' && (
-        <TournamentHubView
-          favoriteTournaments={watchConfig.favoriteTournaments}
-          onToggleTournamentFavorite={handleToggleTournament}
-          onSelectTournament={(t) => setSelectedTournament(t)}
-          enabledGames={watchConfig.enabledGames}
-          pandaToken={watchConfig.pandaToken}
-          footballToken={watchConfig.footballToken}
-        />
-      )}
+        {mountedTabs.tournaments && (
+          <View
+            style={[
+              styles.tabPane,
+              (selectedTournament || activeTab !== 'tournaments') && styles.tabPaneHidden,
+            ]}
+          >
+            <MemoTournamentHubView
+              favoriteTournaments={watchConfig.favoriteTournaments}
+              onToggleTournamentFavorite={handleToggleTournament}
+              onSelectTournament={handleSelectTournament}
+              enabledGames={watchConfig.enabledGames}
+              pandaToken={watchConfig.pandaToken}
+              footballToken={watchConfig.footballToken}
+            />
+          </View>
+        )}
 
-      {/* TAB 3: EXPLORAR CATÁLOGO (TORNEOS Y EQUIPOS) */}
-      {activeTab === 'explore' && (
-        <CatalogExplorerView
-          favoriteTournaments={watchConfig.favoriteTournaments}
-          favoriteTeams={watchConfig.favoriteTeams}
-          onToggleTournament={handleToggleTournament}
-          onToggleTeam={handleToggleTeam}
-          pandaToken={watchConfig.pandaToken}
-          footballToken={watchConfig.footballToken}
-          enabledGames={watchConfig.enabledGames}
-        />
-      )}
+        {mountedTabs.explore && (
+          <View
+            style={[
+              styles.tabPane,
+              (selectedTournament || activeTab !== 'explore') && styles.tabPaneHidden,
+            ]}
+          >
+            <MemoCatalogExplorerView
+              favoriteTournaments={watchConfig.favoriteTournaments}
+              favoriteTeams={watchConfig.favoriteTeams}
+              onToggleTournament={handleToggleTournament}
+              onToggleTeam={handleToggleTeam}
+              pandaToken={watchConfig.pandaToken}
+              footballToken={watchConfig.footballToken}
+              enabledGames={watchConfig.enabledGames}
+            />
+          </View>
+        )}
 
-      {/* TAB 3: AMAZFIT GTR 3 COMPANION */}
-      {activeTab === 'watch' && (
-        <WatchCompanionView
-          config={watchConfig}
-          onUpdateConfig={handleUpdateConfig}
-          onNotify={showToast}
-        />
-      )}
+        {mountedTabs.watch && (
+          <View
+            style={[
+              styles.tabPane,
+              (selectedTournament || activeTab !== 'watch') && styles.tabPaneHidden,
+            ]}
+          >
+            <MemoWatchCompanionView
+              config={watchConfig}
+              onUpdateConfig={handleUpdateConfig}
+              onNotify={showToast}
+            />
+          </View>
+        )}
 
       {/* TAB 4: AJUSTES DE API Y DIAGNÓSTICO */}
-      {activeTab === 'api' && (
+      {mountedTabs.api && (
+        <View
+          style={[
+            styles.tabPane,
+            (selectedTournament || activeTab !== 'api') && styles.tabPaneHidden,
+          ]}
+        >
         <ScrollView style={styles.apiScroll} contentContainerStyle={styles.apiContent}>
           <Text style={styles.apiSectionTitle}>Configuración de Conexiones API</Text>
           <Text style={styles.apiSectionDesc}>
@@ -1481,15 +1540,33 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
               // Aplicar ya los tokens recién guardados sin esperar al siguiente render.
               loadMatches(true, nextConfig);
               showToast('Claves guardadas. Recargando partidos en vivo...');
-              setActiveTab('scores');
+              navigateToTab('scores');
             }}
           >
             Guardar y Aplicar Claves
           </HtzButton>
         </ScrollView>
+        </View>
       )}
-        </>
-      )}
+
+        {selectedTournament && (
+          <View style={styles.tabPane}>
+            <TournamentDetailView
+              tournament={selectedTournament}
+              onBack={() => setSelectedTournament(null)}
+              isFavorite={ScoreService.isTournamentItemFavorite(
+                selectedTournament,
+                watchConfig.favoriteTournaments
+              )}
+              onToggleFavorite={handleToggleTournament}
+              pandaToken={watchConfig.pandaToken}
+              footballToken={watchConfig.footballToken}
+              favoriteTeams={watchConfig.favoriteTeams}
+              onSelectMatchExternal={handleSelectMatch}
+            />
+          </View>
+        )}
+      </View>
 
       {/* Bottom Navigation Bar (Material 3): pill verde detrás del icono activo */}
       <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 0) }]}>
@@ -1500,17 +1577,13 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
               key={id}
               style={styles.bottomTab}
               activeOpacity={0.7}
-              onPress={() => {
-                setSelectedTournament(null);
-                setActiveTab(id);
-              }}
+              onPress={() => navigateToTab(id)}
             >
-              <View
-                style={[
-                  styles.bottomTabIndicator,
-                  isActive && styles.bottomTabIndicatorActive,
-                ]}
-              >
+              <View style={styles.bottomTabIndicator}>
+                {/* Fondo como capa aparte: se monta ya opaco, nunca cambia de
+                    color. Evita el bug de Android que pierde el borderRadius al
+                    pasar de fondo transparente a opaco (react-native#52415). */}
+                {isActive && <View style={styles.bottomTabIndicatorBg} />}
                 <Icon
                   size={17}
                   color={isActive ? htzTokens.colors.inversePrimary : htzTokens.colors.outline}
@@ -1671,11 +1744,16 @@ const styles = StyleSheet.create({
   bottomTabIndicator: {
     width: 56,
     height: 30,
-    borderRadius: 15,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  bottomTabIndicatorActive: {
+  bottomTabIndicatorBg: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 15,
     backgroundColor: 'rgba(74, 124, 89, 0.35)',
   },
   bottomTabLabel: {
@@ -1723,6 +1801,17 @@ const styles = StyleSheet.create({
   },
   mainScoresContainer: {
     flex: 1,
+  },
+  // Contenedor de las pestañas: cada una se queda montada y se oculta con
+  // display:none cuando no está activa (cambio de pestaña instantáneo).
+  tabContent: {
+    flex: 1,
+  },
+  tabPane: {
+    flex: 1,
+  },
+  tabPaneHidden: {
+    display: 'none',
   },
   updateStatusBar: {
     flexDirection: 'row',
@@ -1814,30 +1903,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     gap: 8,
     alignItems: 'center',
-  },
-  sportChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-    paddingHorizontal: 12,
-    height: 32,
-    borderRadius: htzTokens.radius.full,
-    backgroundColor: htzTokens.colors.surfaceVariant,
-    borderWidth: 1,
-    borderColor: htzTokens.colors.outlineVariant,
-  },
-  sportChipSelected: {
-    backgroundColor: 'rgba(74, 124, 89, 0.2)',
-    borderColor: htzTokens.colors.primary,
-  },
-  sportChipText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: htzTokens.colors.onSurfaceVariant,
-  },
-  sportChipTextSelected: {
-    color: htzTokens.colors.inversePrimary,
-    fontWeight: '700',
   },
   filterDivider: {
     width: 1,

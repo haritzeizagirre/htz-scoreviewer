@@ -45,10 +45,15 @@ export const HtzTabs: React.FC<HtzTabsProps> = ({
           styles.tab,
           scrollable && styles.scrollableTab,
           fill && styles.fillTab,
-          isActive && styles.activeTab,
         ]}
         onPress={() => onChange(tab.id)}
       >
+        {/* Fondo del tab activo montado ya opaco (nunca cambia de color): evita
+            el bug de Android que pierde el borderRadius al pasar de fondo
+            transparente a opaco (react-native#52415). */}
+        {isActive && (
+          <View style={[styles.activeTabBg, fill && styles.activeTabBgFill]} />
+        )}
         {tab.icon && (
           <View style={styles.iconWrapper}>
             {tab.icon}
@@ -116,13 +121,22 @@ const styles = StyleSheet.create({
     borderRadius: htzTokens.radius.default,
     gap: 5,
   },
-  activeTab: {
+  activeTabBg: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: htzTokens.radius.default,
     backgroundColor: htzTokens.colors.primary,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.2,
     shadowRadius: 2,
     elevation: 2,
+  },
+  activeTabBgFill: {
+    borderRadius: 0,
   },
   iconWrapper: {
     alignItems: 'center',

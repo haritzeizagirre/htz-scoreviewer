@@ -39,6 +39,7 @@ import {
   HtzTabs,
   HtzChip,
   HtzButton,
+  HtzSportChip,
   TabItem,
 } from './htz';
 import { htzTokens } from './htz/tokens';
@@ -382,8 +383,9 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
 
           {/* Deportes */}
           {availableSportChips.map((chip) => (
-            <HtzChip
+            <HtzSportChip
               key={chip.id}
+              id={chip.id}
               label={chip.label}
               selected={sportFilter === chip.id}
               onPress={() => setSportFilter(chip.id)}

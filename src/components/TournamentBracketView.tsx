@@ -185,15 +185,19 @@ export const TournamentBracketView: React.FC<TournamentBracketViewProps> = ({
         {/* Conmutador de modo: Gráfico vs Lista */}
         <View style={styles.viewToggleGroup}>
           <TouchableOpacity
-            style={[styles.toggleBtn, viewMode === 'visual' && styles.toggleBtnActive]}
+            style={styles.toggleBtn}
             onPress={() => setViewMode('visual')}
           >
+            {/* Fondo montado ya opaco (evita el bug de Android con borderRadius
+                al pasar de transparente a opaco, RN#52415). */}
+            {viewMode === 'visual' && <View style={styles.toggleBtnBg} />}
             <LayoutGrid size={14} color={viewMode === 'visual' ? '#FFFFFF' : htzTokens.colors.outline} />
           </TouchableOpacity>
           <TouchableOpacity
-            style={[styles.toggleBtn, viewMode === 'list' && styles.toggleBtnActive]}
+            style={styles.toggleBtn}
             onPress={() => setViewMode('list')}
           >
+            {viewMode === 'list' && <View style={styles.toggleBtnBg} />}
             <ListFilter size={14} color={viewMode === 'list' ? '#FFFFFF' : htzTokens.colors.outline} />
           </TouchableOpacity>
         </View>
@@ -280,7 +284,13 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 6,
   },
-  toggleBtnActive: {
+  toggleBtnBg: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 6,
     backgroundColor: htzTokens.colors.primary,
   },
   visualBracketContent: {
