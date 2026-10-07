@@ -4,6 +4,9 @@ import { R6MatchData, R6MapData, R6PlayerStats, R6VetoRow } from './types';
 // Memoria caché para evitar consultas redundantes a la web
 const R6_CACHE = new Map<string, R6MatchData>();
 
+// Último motivo de fallo (diagnóstico para mostrar en la UI)
+let lastError: string | null = null;
+
 /**
  * Convierte un nombre de equipo a slug de Gezzly (minúsculas, separadas por guiones)
  */
@@ -74,16 +77,26 @@ async function fetchGezzlyHtml(targetUrl: string): Promise<string> {
   const res = await fetch(url, {
     headers: {
       'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+      Accept:
+        'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9,es;q=0.8',
+      'Cache-Control': 'no-cache',
+      Pragma: 'no-cache',
+      Referer: 'https://www.gezzly.gg/',
+      'Upgrade-Insecure-Requests': '1',
     },
   });
 
   if (!res.ok) {
-    throw new Error(`Error HTTP ${res.status} al conectar con Gezzly`);
+    throw new Error(`HTTP ${res.status} al conectar con Gezzly`);
   }
 
-  return await res.text();
+  const text = await res.text();
+  if (/Just a moment|cf-chl|Attention Required|Checking your browser/i.test(text)) {
+    throw new Error('Bloqueado por Cloudflare (challenge)');
+  }
+  return text;
 }
 
 /**
@@ -511,12 +524,14 @@ export const R6StatsService = {
     }
 
     try {
+      lastError = null;
       let targetUrl = directUrl;
       if (!targetUrl) {
         targetUrl = (await findMatchUrl(teamA, teamB, startTimeIso)) || undefined;
       }
 
       if (!targetUrl) {
+        lastError = 'Partido no encontrado en Gezzly';
         return null;
       }
 
@@ -525,6 +540,7 @@ export const R6StatsService = {
 
       // Si Gezzly devolvió su página "Match Not Found", no hay datos.
       if (parsedData.matchTitle && /Match Not Found/i.test(parsedData.matchTitle)) {
+        lastError = 'Gezzly devolvió "Match Not Found"';
         return null;
       }
 
@@ -547,10 +563,17 @@ export const R6StatsService = {
         return parsedData;
       }
 
+      lastError = 'La ficha no contiene estadísticas';
       return null;
     } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
       console.warn('Error en R6StatsService:', err);
       return null;
     }
+  },
+
+  /** Motivo del último fallo, para diagnóstico. */
+  getLastError(): string | null {
+    return lastError;
   },
 };

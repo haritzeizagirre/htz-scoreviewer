@@ -76,7 +76,9 @@ export const R6ScoreboardView: React.FC<R6ScoreboardViewProps> = ({
         <Shield size={36} color={htzTokens.colors.outline} />
         <Text style={styles.emptyTitle}>Estadísticas de R6 no disponibles</Text>
         <Text style={styles.emptySubtitle}>
-          No se encontró la ficha detallada de este enfrentamiento o aún no se han publicado las estadísticas completas.
+          {R6StatsService.getLastError()
+            ? `Motivo: ${R6StatsService.getLastError()}`
+            : 'No se encontró la ficha detallada de este enfrentamiento o aún no se han publicado las estadísticas completas.'}
         </Text>
         <View style={{ height: 14 }} />
         <HtzButton
