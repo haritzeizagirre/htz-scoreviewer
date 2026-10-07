@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import { getText as nativeGetText } from '../../modules/htz-http/src/HtzHttpModule';
 import { R6MatchData, R6MapData, R6PlayerStats, R6VetoRow } from './types';
 
 // Memoria caché para evitar consultas redundantes a la web
@@ -68,35 +69,72 @@ function normalizeName(name: string): string {
 /**
  * Descarga HTML de una URL de Gezzly manejando proxy en web y petición directa en móvil
  */
+const isCloudflareChallenge = (html: string): boolean =>
+  /Just a moment|cf-chl|Attention Required|Checking your browser/i.test(html);
+
+const GEZZLY_HEADERS = {
+  'User-Agent':
+    'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+  Accept:
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9,es;q=0.8',
+  'Cache-Control': 'no-cache',
+  Pragma: 'no-cache',
+  Referer: 'https://www.gezzly.gg/',
+  'Upgrade-Insecure-Requests': '1',
+};
+
+/**
+ * Fallback con `fetch`: reintenta si el cliente devuelve una respuesta
+ * informacional (1xx, p. ej. 103 Early Hints) en lugar de la final.
+ */
+async function fetchGezzlyWithRetries(targetUrl: string, attempts = 3): Promise<string> {
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const res = await fetch(targetUrl, { headers: GEZZLY_HEADERS });
+    if (res.status >= 100 && res.status < 200) {
+      lastStatus = res.status;
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+      continue;
+    }
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} al conectar con Gezzly`);
+    }
+    return res.text();
+  }
+  throw new Error(`HTTP ${lastStatus} (respuesta informacional) al conectar con Gezzly`);
+}
+
+/**
+ * Descarga HTML de una URL de Gezzly.
+ *  - Web: proxy de Metro (la petición sale desde el servidor).
+ *  - Android: módulo nativo `htz-http` (HTTP/1.1 + ignora 1xx); si no está
+ *    disponible, `fetch` con reintentos.
+ */
 async function fetchGezzlyHtml(targetUrl: string): Promise<string> {
-  const isWeb = Platform.OS === 'web';
-  const url = isWeb
-    ? `/api/proxy/gezzly?url=${encodeURIComponent(targetUrl)}`
-    : targetUrl;
-
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-      Accept:
-        'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.9,es;q=0.8',
-      'Cache-Control': 'no-cache',
-      Pragma: 'no-cache',
-      Referer: 'https://www.gezzly.gg/',
-      'Upgrade-Insecure-Requests': '1',
-    },
-  });
-
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} al conectar con Gezzly`);
+  if (Platform.OS === 'web') {
+    const res = await fetch(`/api/proxy/gezzly?url=${encodeURIComponent(targetUrl)}`);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} al conectar con Gezzly`);
+    }
+    const html = await res.text();
+    if (isCloudflareChallenge(html)) {
+      throw new Error('Bloqueado por Cloudflare (challenge)');
+    }
+    return html;
   }
 
-  const text = await res.text();
-  if (/Just a moment|cf-chl|Attention Required|Checking your browser/i.test(text)) {
+  let html: string;
+  try {
+    html = await nativeGetText(targetUrl);
+  } catch {
+    html = await fetchGezzlyWithRetries(targetUrl);
+  }
+
+  if (isCloudflareChallenge(html)) {
     throw new Error('Bloqueado por Cloudflare (challenge)');
   }
-  return text;
+  return html;
 }
 
 /**
