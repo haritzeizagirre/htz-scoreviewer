@@ -4,6 +4,7 @@ import { Star, ChevronRight } from 'lucide-react-native';
 import { Match, MatchTeam } from '../services/types';
 import { formatMatchSchedule } from '../services/dateUtils';
 import { GameLogo } from './GameLogo';
+import { MarqueeText } from './MarqueeText';
 import { htzTokens } from './htz';
 
 interface MatchRowProps {
@@ -59,9 +60,12 @@ const TeamLine: React.FC<{
   team: MatchTeam;
   score: number | string | null;
   winning: boolean;
-}> = ({ team, score, winning }) => {
+  /** Rondas del mapa en curso (Valorant / CS2 / R6). */
+  roundScore?: number | string;
+}> = ({ team, score, winning, roundScore }) => {
   const [imgError, setImgError] = useState(false);
   const hasLogo = Boolean(team.logo) && !imgError;
+  const hasRoundScore = roundScore !== undefined && roundScore !== null && roundScore !== '';
 
   return (
     <View style={styles.teamLine}>
@@ -81,12 +85,21 @@ const TeamLine: React.FC<{
 
       <View style={styles.teamNameWrap}>
         {team.isFav && <Star size={11} color="#FBBF24" fill="#FBBF24" style={styles.teamFav} />}
-        <Text style={[styles.teamName, winning && styles.winningTeam]} numberOfLines={1}>
-          {team.name}
-        </Text>
+        <MarqueeText
+          text={team.name}
+          textStyle={[styles.teamName, winning && styles.winningTeam]}
+          containerStyle={styles.teamNameMarquee}
+        />
       </View>
 
-      <Text style={[styles.score, winning && styles.winningScore]}>{score ?? ''}</Text>
+      <View style={styles.scoreWrap}>
+        {hasRoundScore && (
+          <View style={styles.liveRoundBadge}>
+            <Text style={styles.liveRoundBadgeText}>{roundScore}</Text>
+          </View>
+        )}
+        <Text style={[styles.score, winning && styles.winningScore]}>{score ?? ''}</Text>
+      </View>
     </View>
   );
 };
@@ -107,12 +120,29 @@ export const MatchRow: React.FC<MatchRowProps> = ({
   const isLive = match.status === 'LIVE';
   const isUpcoming = match.status === 'UPCOMING';
 
+  // Rondas del mapa en curso para shooters tácticos (Valorant, CS2 y R6):
+  // se muestran como badge junto al marcador de la serie, igual que en MatchCard.
+  const hasTacticalRoundScores =
+    isLive &&
+    (match.game === 'VALORANT' || match.game === 'CS2' || match.game === 'R6') &&
+    match.liveRoundScore !== undefined;
+  const liveRoundScoreA = hasTacticalRoundScores ? match.liveRoundScore!.scoreA : undefined;
+  const liveRoundScoreB = hasTacticalRoundScores ? match.liveRoundScore!.scoreB : undefined;
+
   const numA = toNumber(match.teamA.score);
   const numB = toNumber(match.teamB.score);
   const isAWinning = !isLive && !isNaN(numA) && !isNaN(numB) && numA > numB;
   const isBWinning = !isLive && !isNaN(numA) && !isNaN(numB) && numB > numA;
 
   const leftLabel = isLive ? getLiveLabel(match) : schedule.timeText.replace(/h$/, '');
+
+  // Muestra el día bajo la hora cuando el partido no es hoy ("Mañana", "Ayer",
+  // "Jue 9 Oct"...). Para horas sin fecha real ("Reciente") no se añade nada.
+  const dayLabel =
+    !schedule.isToday &&
+    (schedule.isTomorrow || schedule.isYesterday || /\d/.test(schedule.dateText))
+      ? schedule.dateText
+      : '';
 
   return (
     <TouchableOpacity
@@ -121,13 +151,17 @@ export const MatchRow: React.FC<MatchRowProps> = ({
       activeOpacity={0.7}
     >
       <View style={styles.timeCol}>
-        {isLive && <View style={styles.liveDot} />}
-        <Text
-          style={[styles.timeText, isLive && styles.liveTimeText]}
-          numberOfLines={1}
-        >
-          {leftLabel}
-        </Text>
+        <View style={styles.timeRow}>
+          {isLive && <View style={styles.liveDot} />}
+          <MarqueeText
+            text={leftLabel}
+            textStyle={[styles.timeText, isLive && styles.liveTimeText]}
+            containerStyle={styles.timeTextMarquee}
+          />
+        </View>
+        {dayLabel ? (
+          <MarqueeText text={dayLabel} textStyle={styles.timeDayText} />
+        ) : null}
       </View>
 
       {showGame && (
@@ -137,8 +171,18 @@ export const MatchRow: React.FC<MatchRowProps> = ({
       )}
 
       <View style={styles.teamsCol}>
-        <TeamLine team={match.teamA} score={isUpcoming ? null : match.teamA.score} winning={isAWinning} />
-        <TeamLine team={match.teamB} score={isUpcoming ? null : match.teamB.score} winning={isBWinning} />
+        <TeamLine
+          team={match.teamA}
+          score={isUpcoming ? null : match.teamA.score}
+          winning={isAWinning}
+          roundScore={liveRoundScoreA}
+        />
+        <TeamLine
+          team={match.teamB}
+          score={isUpcoming ? null : match.teamB.score}
+          winning={isBWinning}
+          roundScore={liveRoundScoreB}
+        />
       </View>
 
       <ChevronRight size={16} color={htzTokens.colors.outlineVariant} />
@@ -160,10 +204,18 @@ const styles = StyleSheet.create({
   },
   timeCol: {
     width: 62,
+    flexDirection: 'column',
+    justifyContent: 'center',
+    gap: 2,
+  },
+  timeRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'flex-start',
     gap: 4,
+  },
+  timeTextMarquee: {
+    flex: 1,
+    minWidth: 0,
   },
   liveDot: {
     width: 7,
@@ -175,6 +227,11 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
     color: htzTokens.colors.onSurfaceVariant,
+  },
+  timeDayText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: htzTokens.colors.outline,
   },
   liveTimeText: {
     color: htzTokens.colors.error,
@@ -232,11 +289,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
   },
+  teamNameMarquee: {
+    flex: 1,
+    minWidth: 0,
+  },
   teamFav: {
     marginRight: 4,
   },
   teamName: {
-    flex: 1,
     fontSize: 15,
     fontWeight: '600',
     color: htzTokens.colors.onSurface,
@@ -245,13 +305,31 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#FFFFFF',
   },
+  scoreWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginLeft: 8,
+  },
+  liveRoundBadge: {
+    backgroundColor: 'rgba(239, 68, 68, 0.15)',
+    borderWidth: 1,
+    borderColor: '#EF4444',
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 5,
+  },
+  liveRoundBadgeText: {
+    color: '#EF4444',
+    fontSize: 11,
+    fontWeight: '800',
+  },
   score: {
     minWidth: 22,
     textAlign: 'right',
     fontSize: 16,
     fontWeight: '700',
     color: htzTokens.colors.onSurfaceVariant,
-    marginLeft: 8,
   },
   winningScore: {
     color: htzTokens.colors.inversePrimary,

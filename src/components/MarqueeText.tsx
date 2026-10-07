@@ -23,6 +23,8 @@ interface MarqueeTextProps {
   gapMs?: number;
   /** Velocidad de desplazamiento en píxeles por segundo. */
   speed?: number;
+  /** Alineación del texto cuando cabe en el contenedor (p. ej. títulos). */
+  align?: 'left' | 'center' | 'right';
 }
 
 // En web react-native no soporta el driver nativo de animaciones.
@@ -30,18 +32,22 @@ const USE_NATIVE_DRIVER = Platform.OS !== 'web';
 
 /**
  * Texto de una sola línea que se desplaza (ida y vuelta) únicamente cuando no
- * cabe en el ancho disponible. Si cabe, se muestra estático.
+ * cabe en el ancho disponible. Si cabe, se muestra estático en su sitio.
  *
  * Se apoya en un ScrollView horizontal deshabilitado (y sin recepción de toques)
  * como medidor: así se conoce el ancho real del texto aunque supere el contenedor.
+ *
+ * Para que mida bien, el contenedor debe tener un ancho acotado por el padre
+ * (por ejemplo `containerStyle={{ flex: 1, minWidth: 0 }}` dentro de una fila).
  */
 export const MarqueeText: React.FC<MarqueeTextProps> = ({
   text,
   textStyle,
   containerStyle,
-  delayMs = 1400,
-  gapMs = 900,
+  delayMs = 1200,
+  gapMs = 800,
   speed = 35,
+  align = 'left',
 }) => {
   const [viewportWidth, setViewportWidth] = useState(0);
   const [contentWidth, setContentWidth] = useState(0);
@@ -88,10 +94,13 @@ export const MarqueeText: React.FC<MarqueeTextProps> = ({
       <ScrollView
         horizontal
         scrollEnabled={false}
-        pointerEvents="none"
         showsHorizontalScrollIndicator={false}
         style={styles.scroll}
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={[
+          styles.scrollContent,
+          align === 'center' && styles.scrollContentCenter,
+          align === 'right' && styles.scrollContentRight,
+        ]}
         onContentSizeChange={(w: number) => setContentWidth(w)}
       >
         <Animated.View style={{ transform: [{ translateX }] }}>
@@ -111,9 +120,18 @@ const styles = StyleSheet.create({
   scroll: {
     flexGrow: 0,
     width: '100%',
+    // Deja pasar los toques al contenedor pulsable que envuelva al texto.
+    pointerEvents: 'none',
   },
   scrollContent: {
     flexDirection: 'row',
     alignItems: 'center',
+    minWidth: '100%',
+  },
+  scrollContentCenter: {
+    justifyContent: 'center',
+  },
+  scrollContentRight: {
+    justifyContent: 'flex-end',
   },
 });

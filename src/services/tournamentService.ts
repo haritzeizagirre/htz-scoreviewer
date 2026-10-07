@@ -4,6 +4,10 @@ import {
   TournamentItem,
   TournamentFullDetail,
   TournamentBracket,
+  TournamentFormat,
+  TournamentStage,
+  TournamentStageFormat,
+  SwissRound,
   StandingGroup,
   StandingRow,
   BracketRound,
@@ -19,7 +23,7 @@ import { ScoreService, areTeamsMatching } from './scoreService';
 // ==========================================
 const MEMORY_CACHE = new Map<string, { data: TournamentFullDetail; timestamp: number }>();
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutos para datos en directo
-const STORAGE_PREFIX = 'sv_tourn_detail_real_v11_';
+const STORAGE_PREFIX = 'sv_tourn_detail_real_v14_';
 
 // Caché para resolución dinámica de series (evita llamadas API redundantes de búsqueda)
 const SERIES_RESOLUTION_CACHE = new Map<
@@ -34,6 +38,11 @@ const LEAGUE_RESOLUTION_CACHE = new Map<
   { leagueId: number | string; name?: string; slug?: string; logo?: string; timestamp: number }
 >();
 const LEAGUE_TTL_MS = 6 * 60 * 60 * 1000; // 6 horas
+
+// Última edición (serie) conocida por torneo maestro, aprendida al abrir el
+// torneo desde un partido concreto. Permite que la apertura desde el catálogo
+// use la misma edición en vez de resolver por heurísticas de año.
+const LAST_KNOWN_SERIES = new Map<string, { seriesId: number | string; year?: number }>();
 
 const PANDA_VIDEOGAME_SLUGS: Record<string, string> = {
   VALORANT: 'valorant',
@@ -101,6 +110,80 @@ function isKnockoutText(text: string): boolean {
   return /playoff|play-off|knockout|eliminat|bracket|cuart|quarter|semi|\bfinal\b|octav|round of (8|16|32)|\bubqf\b|\bubsf\b|\bubf\b|\blr\d\b|\blbf\b|\bgf\b|ro8|ro16|winners|losers|upper|lower|perdedor|ganador/.test(
     s
   );
+}
+
+/**
+ * ¿El nombre de la fase corresponde a una eliminatoria?
+ */
+function isKnockoutStageName(name: string): boolean {
+  return /playoff|play-off|knockout|eliminat|bracket|cuadro|grand final|upper|lower|winners|losers/i.test(
+    name || ''
+  );
+}
+
+const PLAY_IN_RE = /play-?in|play in|repechaje/i;
+const SWISS_RE = /swiss|suiza/i;
+const GROUPS_RE = /group|grupo/i;
+
+/**
+ * Clave canónica de una fase para agrupar variantes ("Swiss Stage - Round 2"
+ * -> "swiss stage") sin depender del idioma ni de numeraciones.
+ */
+function normalizeStageKey(name: string): string {
+  return (name || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\b(?:round|ronda|matchday|jornada|fase)\s*\d+\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+/**
+ * Nombre legible para la pestaña de una fase del torneo.
+ */
+export function stageDisplayName(raw: string): string {
+  const text = (raw || '').trim();
+  if (!text) return 'Fase';
+  if (SWISS_RE.test(text)) return 'Fase Suiza';
+  if (PLAY_IN_RE.test(text)) return 'Play-In';
+  if (/^playoffs?$/i.test(text) || /^play-offs?$/i.test(text)) return 'Playoffs';
+  if (/group stage|^fase de grupos|^grupos?$/i.test(text)) return 'Fase de Grupos';
+  const groupSuffix = text.match(/^(?:group|grupo)\s+([a-z0-9]+)$/i);
+  if (groupSuffix) return `Grupo ${groupSuffix[1].toUpperCase()}`;
+  if (/regular season|temporada regular/i.test(text)) return 'Temporada Regular';
+  return text;
+}
+
+/**
+ * Clasifica una fase según su nombre y sus partidos.
+ */
+function classifyStageFormat(name: string, matches: Match[]): TournamentStageFormat {
+  const text = (name || '').trim();
+  if (SWISS_RE.test(text)) return 'SWISS';
+  if (PLAY_IN_RE.test(text)) return 'PLAY_IN';
+  if (isKnockoutStageName(text)) return 'KNOCKOUT';
+  if (GROUPS_RE.test(text)) return 'GROUPS';
+  if (matches.length > 0 && matches.every((m) => isKnockoutText(matchDetailText(m)))) {
+    return 'KNOCKOUT';
+  }
+  return 'LEAGUE';
+}
+
+/** Texto completo de fase de un partido (fase + serie concreta + ronda/mapa). */
+function matchStageText(m: Match): string {
+  return `${extractStagePrefix(m.details?.tournamentStage, m.details?.stageName)} ${extractMatchName(
+    m.details?.tournamentStage
+  )} ${m.details?.roundOrMap || ''}`;
+}
+
+/**
+ * Texto del partido SIN el nombre de la fase, para saber si el propio cruce es
+ * eliminatorio (evita que un Play-In de liguilla parezca un cuadro solo porque
+ * su fase se llame "Play-In").
+ */
+function matchDetailText(m: Match): string {
+  return `${extractMatchName(m.details?.tournamentStage)} ${m.details?.roundOrMap || ''}`;
 }
 
 interface ParsedKnockoutMatch {
@@ -223,17 +306,28 @@ function toBracketMatch(m: Match): BracketMatch {
  * Respeta 'TBD' si los cruces no están determinados y nunca inventa equipos.
  * Separa la fase principal (Playoffs) de fases previas (Play-In), clasifica rondas
  * de cuadro ganadores/perdedores sin duplicar partidos y numera cada ronda.
+ *
+ * `assumeKnockout` se usa para fases que ya sabemos que son eliminatorias por su
+ * nombre (Play-In, Playoffs) aunque los partidos no incluyan palabras clave.
  */
-export function buildBracketFromMatches(matches: Match[]): TournamentBracket | undefined {
+export function buildBracketFromMatches(
+  matches: Match[],
+  opts?: { assumeKnockout?: boolean }
+): TournamentBracket | undefined {
   if (!matches || matches.length === 0) return undefined;
 
   // 1. Descartar fases de grupos/liga/suiza y quedarnos con partidos de eliminatorias
   const candidates = matches.filter((m) => {
+    if (opts?.assumeKnockout) {
+      const prefix = extractStagePrefix(m.details?.tournamentStage, m.details?.stageName);
+      // Las fases de grupos embebidas ("Competición 2026 (Group A)") no son eliminatorias
+      return !/\((?:group|grupo)\s+[^)]+\)/i.test(`${prefix} ${m.details?.tournamentStage || ''}`);
+    }
     const prefix = extractStagePrefix(m.details?.tournamentStage, m.details?.stageName);
     if (/^(group|grupo|regular|swiss|suiza|temporada|liga|league|stage \d|fase \d)/i.test(prefix.trim())) {
       return false;
     }
-    const text = `${prefix} ${extractMatchName(m.details?.tournamentStage)} ${m.details?.roundOrMap || ''}`;
+    const text = matchStageText(m);
     // Fases tipo "Competición 2026 (Group A)" no son eliminatorias
     if (/\((?:group|grupo)\s+[^)]+\)/i.test(text)) return false;
     return isKnockoutText(text);
@@ -557,6 +651,8 @@ export function projectBracketFromStandings(standings: StandingGroup[]): Tournam
 /**
  * Nombre de tabla normalizado a partir de la fase oficial del torneo.
  * Devuelve null si la fase es de eliminatorias (no genera clasificación).
+ * Para fases con nombre propio (Play-In, Tiebreakers, Round Robin...) se usa su
+ * propio nombre: así las liguillas cortas de clasificación no desaparecen.
  */
 function resolveStageGroupName(stageName: string): string | null {
   const text = (stageName || '').trim();
@@ -578,11 +674,16 @@ function resolveStageGroupName(stageName: string): string | null {
   }
 
   if (/swiss/.test(lower)) return 'Fase Suiza';
+  if (/play-?in|repechaje/.test(lower)) return stageDisplayName(text);
+  if (/round\s*robin|ronda\s*robin/.test(lower)) return text;
   if (/regular|temporada regular|season/.test(lower)) return 'Temporada Regular';
   const stageNum = lower.match(/^(?:stage|fase)\s*(\d+)\b/);
   if (stageNum) return `Fase ${stageNum[1]}`;
   if (/survival|supervivencia/.test(lower)) return 'Fase de Supervivencia';
-  return null;
+  // Rondas sueltas de eliminatoria ("Round 1", "Ronda 2"...) no generan tabla
+  if (/^(round|ronda)\b/i.test(text)) return null;
+  // Cualquier otra fase con nombre propio (Tiebreakers, Qualifier, Round Robin...)
+  return text.length <= 60 ? text : text.slice(0, 60);
 }
 
 /**
@@ -825,8 +926,22 @@ export function buildStandingsFromMatches(matches: Match[]): StandingGroup[] {
  */
 export function applyEsportsStandingZones(detail: TournamentFullDetail): void {
   if (detail.game === 'FÚTBOL') return;
-  const bracket = detail.bracket;
-  const standings = detail.standings || [];
+  applyBracketZonesToStandings(detail.standings || [], detail.bracket);
+}
+
+/**
+ * Aplica zonas de color a una lista de clasificaciones a partir de un cuadro real:
+ * equipos presentes en el cuadro de ganadores -> 'playoff_upper' (verde),
+ * equipos que solo aparecen en el cuadro de perdedores -> 'playoff_lower' (ámbar),
+ * el resto -> 'eliminated' (rojo). Solo se aplica a tablas de clasificación finales
+ * (temporada regular / grupos), no a fases intermedias (suiza, supervivencia, play-in...).
+ * Es reutilizable por cada fase del torneo (Play-In, Suiza, Playoffs...).
+ */
+export function applyBracketZonesToStandings(
+  standings: StandingGroup[],
+  bracket?: TournamentBracket,
+  opts?: { force?: boolean }
+): void {
   if (!bracket || standings.length === 0) return;
 
   const norm = (s: string) => (s || '').toLowerCase().trim();
@@ -866,6 +981,7 @@ export function applyEsportsStandingZones(detail: TournamentFullDetail): void {
   for (const group of standings) {
     const name = group.groupName || '';
     const isQualificationTable =
+      opts?.force ||
       /temporada regular|regular season|fase de grupos/i.test(name) ||
       (/grupo|group\b/i.test(name) && standings.length <= 4 && !hasIntermediateStage);
 
@@ -931,6 +1047,258 @@ export function extractParticipantsFromMatches(matches: Match[]): TournamentPart
   }
 
   return Array.from(teamMap.values());
+}
+
+// ==========================================
+// FASES DEL TORNEO (PLAY-IN, SUIZA, GRUPOS, PLAYOFFS...)
+// ==========================================
+
+/**
+ * Marca en una tabla suiza qué equipos ya han asegurado el pase y cuáles están
+ * eliminados según su récord (formato estándar: 3 victorias pasan, 3 derrotas fuera).
+ */
+function applySwissZones(groups: StandingGroup[]): void {
+  for (const group of groups) {
+    const total = group.table.length;
+    if (total < 3) continue;
+    const winTarget = total >= 8 ? 3 : 2;
+    const lossTarget = total >= 8 ? 3 : 2;
+    for (const row of group.table) {
+      if (row.won >= winTarget) row.zone = 'playoff_upper';
+      else if (row.lost >= lossTarget) row.zone = 'eliminated';
+    }
+  }
+}
+
+/**
+ * Construye los cruces ronda a ronda de una fase suiza. Como cada equipo juega
+ * una serie por ronda, la ronda de un partido es la siguiente a la del equipo
+ * que más series lleva jugadas; además se anota el récord ("3-1") de cada equipo
+ * justo antes del cruce para poder pintarlo en el cuadro.
+ */
+export function buildSwissRounds(matches: Match[]): SwissRound[] {
+  const ordered = matches
+    .filter(
+      (m) =>
+        m.teamA?.name &&
+        m.teamB?.name &&
+        m.teamA.name !== 'TBD' &&
+        m.teamB.name !== 'TBD'
+    )
+    .slice()
+    .sort((a, b) => new Date(a.startTimeIso).getTime() - new Date(b.startTimeIso).getTime());
+
+  const played = new Map<string, number>();
+  const wins = new Map<string, number>();
+  const losses = new Map<string, number>();
+  const rounds = new Map<number, BracketMatch[]>();
+
+  for (const m of ordered) {
+    const a = m.teamA.name;
+    const b = m.teamB.name;
+    const roundNumber = Math.max(played.get(a) || 0, played.get(b) || 0) + 1;
+
+    const bm = toBracketMatch(m);
+    bm.teamA.record = `${wins.get(a) || 0}-${losses.get(a) || 0}`;
+    bm.teamB.record = `${wins.get(b) || 0}-${losses.get(b) || 0}`;
+
+    if (!rounds.has(roundNumber)) rounds.set(roundNumber, []);
+    rounds.get(roundNumber)!.push(bm);
+
+    played.set(a, roundNumber);
+    played.set(b, roundNumber);
+
+    if (m.status === 'FINISHED') {
+      const sA = Number(m.teamA.score) || 0;
+      const sB = Number(m.teamB.score) || 0;
+      if (sA > sB) {
+        wins.set(a, (wins.get(a) || 0) + 1);
+        losses.set(b, (losses.get(b) || 0) + 1);
+      } else if (sB > sA) {
+        wins.set(b, (wins.get(b) || 0) + 1);
+        losses.set(a, (losses.get(a) || 0) + 1);
+      }
+    }
+  }
+
+  return Array.from(rounds.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([roundNumber, roundMatches]) => ({
+      roundNumber,
+      roundName: `Ronda ${roundNumber}`,
+      matches: roundMatches,
+    }));
+}
+
+/**
+ * Construye una fase completa (tabla y/o cuadro) a partir de sus partidos reales.
+ */
+function buildStage(id: string, rawName: string, matches: Match[]): TournamentStage {
+  const name = stageDisplayName(rawName || 'Fase');
+  const format = classifyStageFormat(rawName, matches);
+  const stage: TournamentStage = { id, name, format, matches };
+
+  if (format === 'SWISS') {
+    const swissRounds = buildSwissRounds(matches);
+    if (swissRounds.length > 0) stage.swissRounds = swissRounds;
+    const standings = buildStandingsFromMatches(matches);
+    if (standings.length > 0) {
+      applySwissZones(standings);
+      stage.standings = standings;
+    }
+    return stage;
+  }
+
+  if (format === 'PLAY_IN') {
+    const standings = buildStandingsFromMatches(matches);
+    if (standings.length > 0) stage.standings = standings;
+    // Solo se pinta cuadro si dentro del Play-In hay cruces eliminatorios reales;
+    // si es una liguilla de clasificación se queda como tabla.
+    const knockoutInStage = matches.some((m) => isKnockoutText(matchDetailText(m)));
+    if (knockoutInStage) {
+      stage.bracket =
+        buildBracketFromMatches(matches) ||
+        buildBracketFromMatches(matches, { assumeKnockout: true });
+    }
+    if (stage.standings && stage.bracket) {
+      applyBracketZonesToStandings(stage.standings, stage.bracket, { force: true });
+    }
+    return stage;
+  }
+
+  if (format === 'KNOCKOUT') {
+    stage.bracket = buildBracketFromMatches(matches, { assumeKnockout: true });
+    const standings = buildStandingsFromMatches(matches);
+    if (standings.length > 0 && !stage.bracket) stage.standings = standings;
+    return stage;
+  }
+
+  // GROUPS / LEAGUE: la fase se representa con su clasificación
+  const standings = buildStandingsFromMatches(matches);
+  if (standings.length > 0) stage.standings = standings;
+  return stage;
+}
+
+interface StageHint {
+  id?: number | string;
+  name?: string;
+  beginAt?: string;
+}
+
+/**
+ * Agrupa los partidos de un torneo en sus fases reales (Play-In, Fase Suiza,
+ * Playoffs, Grupos...) y construye la tabla/cuadro de cada una sin mezclar
+ * formatos. La clave de agrupación es el id de fase de la API y, si no existe,
+ * el nombre normalizado (así "Swiss Stage - Round 2" cae en la fase suiza).
+ */
+export function buildStagesFromMatches(matches: Match[], stageHints?: StageHint[]): TournamentStage[] {
+  if (!matches || matches.length === 0) return [];
+
+  const hintById = new Map<string, StageHint>();
+  const hintOrderById = new Map<string, number>();
+  (stageHints || []).forEach((hint, idx) => {
+    if (hint?.id === undefined || hint.id === null) return;
+    hintById.set(String(hint.id), hint);
+    hintOrderById.set(String(hint.id), idx);
+  });
+
+  interface StageGroup {
+    key: string;
+    rawName: string;
+    stageId?: string;
+    matches: Match[];
+    firstTime: number;
+    order: number;
+  }
+
+  const groups = new Map<string, StageGroup>();
+
+  for (const m of matches) {
+    const stageId =
+      m.details?.stageId !== undefined && m.details?.stageId !== null
+        ? String(m.details.stageId)
+        : undefined;
+    const rawName = (
+      m.details?.stageName ||
+      extractStagePrefix(m.details?.tournamentStage) ||
+      ''
+    ).trim();
+    const canonical = normalizeStageKey(rawName) || 'general';
+    const key = stageId ? `id:${stageId}` : `key:${canonical}`;
+    const time = new Date(m.startTimeIso).getTime() || Number.MAX_SAFE_INTEGER;
+
+    let group = groups.get(key);
+    if (!group) {
+      const hint = stageId ? hintById.get(stageId) : undefined;
+      group = {
+        key,
+        rawName: (hint?.name || rawName || '').trim(),
+        stageId,
+        matches: [],
+        firstTime: time,
+        order:
+          stageId && hintOrderById.has(stageId)
+            ? hintOrderById.get(stageId)!
+            : Number.MAX_SAFE_INTEGER,
+      };
+      groups.set(key, group);
+    } else if (!group.rawName && rawName) {
+      group.rawName = rawName;
+    }
+
+    group.matches.push(m);
+    if (time < group.firstTime) group.firstTime = time;
+  }
+
+  const stageGroups = Array.from(groups.values()).sort((a, b) => {
+    if (a.order !== b.order) return a.order - b.order;
+    if (a.firstTime !== b.firstTime) return a.firstTime - b.firstTime;
+    return a.rawName.localeCompare(b.rawName, 'es');
+  });
+
+  // Salvaguarda: cuando no hay ids de fase y cada partido ha quedado como una
+  // "fase" distinta (porque el nombre del partido no es una fase real), se
+  // agrupa todo en una única fase para no fragmentar el torneo.
+  const hasStageIds = matches.some(
+    (m) => m.details?.stageId !== undefined && m.details?.stageId !== null
+  );
+  if (!hasStageIds && stageGroups.length > 3 && stageGroups.length > matches.length / 2) {
+    const sampleName = matches[0]?.details?.stageName || '';
+    return [buildStage('all', sampleName, matches)];
+  }
+
+  return stageGroups.map((group) => buildStage(group.key, group.rawName || 'Fase', group.matches));
+}
+
+/**
+ * Deduce el formato global del torneo a partir de sus fases y datos reales,
+ * para que la ficha técnica y las pestañas describan lo que se juega de verdad.
+ */
+export function inferTournamentFormat(detail: TournamentFullDetail): TournamentFormat {
+  const stages = detail.stages || [];
+  if (stages.some((s) => s.format === 'SWISS')) return 'SWISS';
+
+  const hasBracket = Boolean(
+    detail.bracket && (detail.bracket.upperRounds?.length || detail.bracket.grandFinal)
+  );
+  const hasTable = Boolean(detail.standings && detail.standings.length > 0);
+
+  if (hasBracket && hasTable) return 'HYBRID_GROUPS_PLAYOFFS';
+  if (hasBracket) return 'PLAYOFFS';
+  if (hasTable) return 'LEAGUE';
+  return detail.format;
+}
+
+/**
+ * ¿Las fases construidas aportan información real como para usarlas en la vista?
+ * Si todo ha caído en una única fase genérica de liga (feed de partidos sin
+ * nombres de fase), es mejor conservar la vista heredada de tabla + cuadro.
+ */
+function stagesAreInformative(stages: TournamentStage[]): boolean {
+  if (stages.length > 1) return true;
+  if (stages.length === 0) return false;
+  const only = stages[0];
+  return only.format !== 'LEAGUE';
 }
 
 // ==========================================
@@ -1720,7 +2088,7 @@ export const TournamentService = {
       tier: tournament.tier,
       region: tournament.region,
       format: isLeague ? 'LEAGUE' : 'PLAYOFFS',
-      season: tournament.season || (tournament.game === 'FÚTBOL' ? '2025/2026' : '2026'),
+      season: tournament.season || (tournament.game === 'FÚTBOL' ? '2025/2026' : String(new Date().getFullYear())),
       description: tournament.description || `Competición oficial de ${tournament.game}`,
       participants: [],
       matches: [],
@@ -1738,8 +2106,21 @@ export const TournamentService = {
     tokens: { pandaToken?: string; footballToken?: string },
     forceRefresh = false
   ): Promise<TournamentFullDetail> {
-    const seasonKey = tournament.season ? `_${tournament.season.replace(/\s+/g, '_')}` : '';
-    const key = `${tournament.id}${seasonKey}`;
+    // Temporada efectiva: la solicitada o, si no hay, la de la semilla del torneo
+    // (año en curso para esports). Sin esto, un torneo abierto desde el catálogo
+    // sin temporada podía resolver la edición más reciente finalizada (año anterior).
+    const masterSeed = this.getMasterSeed(tournament);
+    const effectiveSeason = tournament.season || masterSeed.season;
+    const effectiveTournament: TournamentItem = effectiveSeason
+      ? { ...tournament, season: effectiveSeason }
+      : tournament;
+
+    const seasonKey = effectiveSeason ? `_${effectiveSeason.replace(/\s+/g, '_')}` : '';
+    const pinKey =
+      tournament.pinnedSeriesId !== undefined && tournament.pinnedSeriesId !== null
+        ? `_p${tournament.pinnedSeriesId}`
+        : '';
+    const key = `${tournament.id}${seasonKey}${pinKey}`;
     const now = Date.now();
 
     // 1. Comprobar caché L1 (RAM)
@@ -1751,9 +2132,9 @@ export const TournamentService = {
     }
 
     // 2. Comprobar caché L2 (AsyncStorage)
-    let baseDetail: TournamentFullDetail = this.getMasterSeed(tournament);
-    if (tournament.season) {
-      baseDetail.season = tournament.season;
+    let baseDetail: TournamentFullDetail = masterSeed;
+    if (effectiveSeason) {
+      baseDetail.season = effectiveSeason;
     }
     try {
       const stored = await AsyncStorage.getItem(STORAGE_PREFIX + key);
@@ -1764,6 +2145,7 @@ export const TournamentService = {
           ...parsed,
           bracket: parsed.bracket || baseDetail.bracket,
           standings: (parsed.standings && parsed.standings.length > 0) ? parsed.standings : baseDetail.standings,
+          stages: (parsed.stages && parsed.stages.length > 0) ? parsed.stages : baseDetail.stages,
           participants: (parsed.participants && parsed.participants.length > 0) ? parsed.participants : baseDetail.participants,
         };
       }
@@ -1778,16 +2160,15 @@ export const TournamentService = {
     let hasLoadedLiveMatches = false;
     if (tournament.game !== 'FÚTBOL' && tokens.pandaToken) {
       try {
-        const pandaData = await this.fetchPandaTournamentData(tournament, tokens.pandaToken);
+        const pandaData = await this.fetchPandaTournamentData(effectiveTournament, tokens.pandaToken);
         if (pandaData && pandaData.matches && pandaData.matches.length > 0) {
           baseDetail.matches = pandaData.matches;
 
           // Los datos oficiales SIEMPRE sustituyen a la semilla (aunque vengan vacíos,
           // es mejor no mostrar una clasificación/cuadro inventados).
           baseDetail.standings = pandaData.standings || [];
-          baseDetail.bracket =
-            pandaData.bracket ||
-            (baseDetail.standings.length > 0 ? projectBracketFromStandings(baseDetail.standings) : undefined);
+          baseDetail.bracket = pandaData.bracket;
+          baseDetail.stages = pandaData.stages;
           baseDetail.participants =
             pandaData.participants && pandaData.participants.length > 0
               ? pandaData.participants
@@ -1817,18 +2198,19 @@ export const TournamentService = {
     // Fallback a partidos locales o de scoreService si no se cargaron por PandaScore
     if (!hasLoadedLiveMatches) {
       try {
-        const matches = await ScoreService.fetchMatchesForTournament(tournament, tokens);
+        const matches = await ScoreService.fetchMatchesForTournament(effectiveTournament, tokens);
         if (matches && matches.length > 0) {
           baseDetail.matches = matches;
           if (!baseDetail.bracket) {
             baseDetail.bracket = buildBracketFromMatches(matches);
-            if (!baseDetail.bracket && baseDetail.standings && baseDetail.standings.length > 0) {
-              baseDetail.bracket = projectBracketFromStandings(baseDetail.standings);
-            }
           }
           if ((!baseDetail.standings || baseDetail.standings.length === 0) && tournament.game !== 'FÚTBOL') {
             const dynamicStandings = buildStandingsFromMatches(matches);
             if (dynamicStandings.length > 0) baseDetail.standings = dynamicStandings;
+          }
+          if (tournament.game !== 'FÚTBOL') {
+            const fallbackStages = buildStagesFromMatches(matches);
+            if (stagesAreInformative(fallbackStages)) baseDetail.stages = fallbackStages;
           }
           if (!baseDetail.participants || baseDetail.participants.length === 0) {
             baseDetail.participants = extractParticipantsFromMatches(matches);
@@ -1856,12 +2238,15 @@ export const TournamentService = {
       }
     }
 
-    // 4.5. Garantía final universal: si después de cargar datos en vivo no hay bracket pero sí clasificaciones, proyectar
-    if (!baseDetail.bracket && baseDetail.standings && baseDetail.standings.length > 0 && baseDetail.format !== 'LEAGUE') {
-      baseDetail.bracket = projectBracketFromStandings(baseDetail.standings);
+    // 4.5. Formato real del torneo y zonas de color de la clasificación.
+    // Ya no se proyectan cuadros inventados: el cuadro solo se pinta si existen
+    // partidos eliminatorios reales, para no mostrar un bracket a torneos que se
+    // juegan en liga, suizo o liguillas de clasificación.
+    // Los torneos con semilla maestra propia conservan el formato declarado en
+    // el catálogo (Champions League, ligas...) salvo que haya fases reales.
+    if ((baseDetail.stages?.length || 0) > 0 || !MASTER_SEEDS[tournament.id]) {
+      baseDetail.format = inferTournamentFormat(baseDetail);
     }
-
-    // 4.6. Zonas de color de la clasificación (playoff / cuadro ganadores / perdedores / eliminado)
     applyEsportsStandingZones(baseDetail);
 
     // 5. Persistir en caché L1 y L2
@@ -1896,7 +2281,11 @@ export const TournamentService = {
     const cleanToken = token.trim();
     if (!cleanToken) return null;
 
-    const cacheKey = `${tournament.game}_${tournament.id}_${tournament.season || 'default'}`;
+    const cacheKey = `${tournament.game}_${tournament.id}_${
+      tournament.pinnedSeriesId !== undefined && tournament.pinnedSeriesId !== null
+        ? `p${tournament.pinnedSeriesId}`
+        : 'nopin'
+    }_${tournament.season || 'default'}`;
     const now = Date.now();
     const cached = SERIES_RESOLUTION_CACHE.get(cacheKey);
     if (cached && now - cached.timestamp < SERIES_TTL_MS) {
@@ -1945,7 +2334,33 @@ export const TournamentService = {
     try {
       let seriesCandidates: any[] = [];
 
-      // 0. Resolver la liga PandaScore si el torneo no la trae del catálogo
+      // 0. Año/split objetivo (de la temporada o del nombre del torneo). Se usa
+      //    tanto para buscar la liga como para priorizar la edición correcta,
+      //    evitando caer en la edición del año anterior.
+      const seasonStr = `${tournament.season || ''} ${tournament.name || ''}`;
+      const yearMatch = seasonStr.match(/\b(202\d)\b/);
+      const splitMatch = seasonStr.match(/\b(Summer|Spring|Winter|Autumn|Fall)\b/i);
+      const targetYear = yearMatch ? parseInt(yearMatch[1], 10) : undefined;
+      const vgSlug =
+        tournament.game === 'VALORANT' ? 'valorant' :
+        tournament.game === 'LOL' ? 'lol' :
+        tournament.game === 'CS2' ? 'csgo' :
+        tournament.game === 'DOTA2' ? 'dota2' :
+        tournament.game === 'R6' ? 'r6siege' : null;
+
+      // Edición fijada: la del partido clicado o, si no, la última aprendida para
+      // este torneo (solo si encaja con el año objetivo).
+      const rememberedSeries = LAST_KNOWN_SERIES.get(tournament.id);
+      const effectivePinId =
+        tournament.pinnedSeriesId ??
+        (rememberedSeries &&
+        (targetYear === undefined ||
+          rememberedSeries.year === undefined ||
+          rememberedSeries.year === targetYear)
+          ? rememberedSeries.seriesId
+          : undefined);
+
+      // 0a. Resolver la liga PandaScore si el torneo no la trae del catálogo
       //    (caso de los torneos dinámicos abiertos desde la lista de partidos).
       let effectiveLeagueId: number | string | undefined = tournament.leagueId;
       let resolvedLeague: { leagueId: number | string; name?: string; slug?: string; logo?: string } | undefined;
@@ -1958,9 +2373,25 @@ export const TournamentService = {
           resolvedLeague = cachedLeague;
         } else {
           const vg = PANDA_VIDEOGAME_SLUGS[tournament.game];
+          // PandaScore devuelve el slug del videojuego a veces largo ("league-of-legends")
+          // y a veces corto ("lol"): se aceptan ambas variantes.
+          const vgMatches = (slug: string) => {
+            const s = (slug || '').toLowerCase();
+            if (!vg || !s) return false;
+            if (s === vg) return true;
+            const aliases: Record<string, string[]> = {
+              'league-of-legends': ['lol'],
+              'cs-go': ['csgo'],
+              'dota-2': ['dota2'],
+              'r6-siege': ['r6siege'],
+            };
+            return (aliases[vg] || []).includes(s);
+          };
           const rawName = (tournament.name || '').replace(/\s*•.*$/, '').trim();
           const attempts: string[] = [];
           if (rawName) {
+            // Primero con el año: cubre ligas que separan ediciones por nombre
+            if (targetYear) attempts.push(`${rawName} ${targetYear}`);
             attempts.push(rawName);
             const words = rawName.split(/\s+/);
             if (words.length >= 3) attempts.push(words.slice(0, 2).join(' '));
@@ -1981,7 +2412,7 @@ export const TournamentService = {
             const list = await safeFetchPanda(`/leagues?search[name]=${encodeURIComponent(q)}&per_page=25`);
             if (!list || list.length === 0) continue;
             const sameGame = vg
-              ? list.filter((l: any) => (l.videogame?.slug || '').toLowerCase() === vg)
+              ? list.filter((l: any) => vgMatches(l.videogame?.slug))
               : [];
             const pool = sameGame.length > 0 ? sameGame : list;
             const best =
@@ -2000,9 +2431,11 @@ export const TournamentService = {
         }
       }
 
-      // 0b. Serie configurada explícitamente en el catálogo (externalId)
-      if (tournament.externalId) {
-        const directSeries = await safeFetchPandaOne(`/series/${tournament.externalId}`);
+      // 0b. Serie configurada explícitamente en el catálogo (externalId) o fijada
+      //     por el partido desde el que se abrió el torneo (effectivePinId)
+      const explicitSeriesId = effectivePinId ?? tournament.externalId;
+      if (explicitSeriesId !== undefined && explicitSeriesId !== null) {
+        const directSeries = await safeFetchPandaOne(`/series/${explicitSeriesId}`);
         if (directSeries && directSeries.id) {
           seriesCandidates.push(directSeries);
         }
@@ -2022,15 +2455,20 @@ export const TournamentService = {
         }
       }
 
+      // 1b. Refuerzo: búsqueda directa de la edición del año objetivo por slug.
+      //     Cubre ligas cuyos listados no incluyen la edición en curso.
+      if (targetYear && tournament.slug && vgSlug) {
+        const baseSlug = tournament.slug.replace(/^(valorant|lol|cs2|cs-go|r6|dota2)-/, '');
+        const yearList = await safeFetchPanda(
+          `/${vgSlug}/series?search[slug]=${encodeURIComponent(`${baseSlug}-${targetYear}`)}&per_page=20`
+        );
+        if (yearList && yearList.length > 0) {
+          seriesCandidates.push(...yearList);
+        }
+      }
+
       // 2. Si no hay candidatos o el torneo no tiene leagueId, buscar por slug o nombre
       if (seriesCandidates.length === 0) {
-        const vgSlug =
-          tournament.game === 'VALORANT' ? 'valorant' :
-          tournament.game === 'LOL' ? 'lol' :
-          tournament.game === 'CS2' ? 'csgo' :
-          tournament.game === 'DOTA2' ? 'dota2' :
-          tournament.game === 'R6' ? 'r6siege' : null;
-
         if (vgSlug) {
           const searchKeyword = tournament.slug
             ? tournament.slug.replace(/^(valorant|lol|cs2|cs-go|r6|dota2)-/, '').replace(/-(2024|2025|2026|2027)$/, '')
@@ -2076,6 +2514,9 @@ export const TournamentService = {
         if (tId.includes('champions') || tSlug.includes('champions')) {
           return sText.includes('champions');
         }
+        if (tId.includes('world') || tSlug.includes('world') || /world championship/.test(tName)) {
+          return sText.includes('world');
+        }
         if (tId.includes('masters') || tSlug.includes('masters')) {
           return sText.includes('masters');
         }
@@ -2112,6 +2553,15 @@ export const TournamentService = {
         filtered = modernSeries;
       }
 
+      // La serie fijada desde el partido nunca se descarta por filtros de nombre
+      if (effectivePinId !== undefined && effectivePinId !== null) {
+        const pinId = String(effectivePinId);
+        if (!filtered.some((s: any) => String(s.id) === pinId)) {
+          const rawPin = seriesCandidates.find((s: any) => String(s.id) === pinId);
+          if (rawPin) filtered = [rawPin, ...filtered];
+        }
+      }
+
       if (filtered.length === 0) {
         if (tournament.externalId) {
           return { seriesId: tournament.externalId };
@@ -2125,7 +2575,12 @@ export const TournamentService = {
         if (s.year) return new Date(`${s.year}-06-01`).getTime();
         return 0;
       };
-      filtered.sort((a: any, b: any) => getSeriesTime(b) - getSeriesTime(a));
+      filtered.sort((a: any, b: any) => {
+        const diff = getSeriesTime(b) - getSeriesTime(a);
+        if (diff !== 0) return diff;
+        // Sin fechas fiables, las series con id mayor son las más recientes
+        return Number(b.id || 0) - Number(a.id || 0);
+      });
 
       const nowDate = new Date();
 
@@ -2147,22 +2602,32 @@ export const TournamentService = {
         timestamp: now,
       });
 
+      // Prioridad absoluta: la serie fijada desde el partido es la edición exacta
+      // que el usuario está viendo, así que gana a cualquier heurística de año.
+      const matchPinnedSeries =
+        effectivePinId !== undefined && effectivePinId !== null
+          ? filtered.find((s: any) => String(s.id) === String(effectivePinId))
+          : undefined;
+      if (matchPinnedSeries) {
+        const res = buildRes(matchPinnedSeries);
+        SERIES_RESOLUTION_CACHE.set(cacheKey, res);
+        return res;
+      }
+
       // Serie configurada explícitamente en el catálogo (si sigue siendo válida)
       const pinnedSeries = tournament.externalId
         ? filtered.find((s: any) => String(s.id) === String(tournament.externalId))
         : undefined;
 
-      // Prioridad 0: Si el torneo o el usuario solicita una temporada/año explícito (ej. "Summer 2026", "2026")
-      const seasonStr = `${tournament.season || ''} ${tournament.name || ''}`;
-      const yearMatch = seasonStr.match(/\b(202\d)\b/);
-      const splitMatch = seasonStr.match(/\b(Summer|Spring|Winter|Autumn|Fall)\b/i);
-
-      if (yearMatch) {
-        const targetYear = parseInt(yearMatch[1], 10);
+      // Prioridad 0: edición del año objetivo (ej. "Summer 2026", "2026",
+      // "Demacia Cup 2026"). El año puede venir en el campo year, en las fechas
+      // o directamente en el nombre/slug de la serie.
+      if (targetYear !== undefined) {
+        const yearTag = new RegExp(`(^|[^0-9])${targetYear}([^0-9]|$)`);
         const yearMatches = filtered.filter((s: any) => {
           if (s.year === targetYear) return true;
           if (s.begin_at && new Date(s.begin_at).getFullYear() === targetYear) return true;
-          return false;
+          return yearTag.test(`${s.full_name || ''} ${s.name || ''} ${s.slug || ''}`);
         });
 
         if (yearMatches.length > 0) {
@@ -2184,6 +2649,18 @@ export const TournamentService = {
             .sort((a: any, b: any) => new Date(a.begin_at).getTime() - new Date(b.begin_at).getTime())[0];
           const bestYear = runningYear || upcomingYear || yearMatches[0];
           const res = buildRes(bestYear);
+          SERIES_RESOLUTION_CACHE.set(cacheKey, res);
+          return res;
+        }
+
+        // Prioridad 0b: ninguna serie declara el año objetivo (ni year, ni fechas,
+        // ni nombre). Los ids de PandaScore son crecientes, así que se elige la
+        // serie más moderna para no caer en una edición antigua.
+        const newestById = filtered
+          .slice()
+          .sort((a: any, b: any) => Number(b.id || 0) - Number(a.id || 0))[0];
+        if (newestById) {
+          const res = buildRes(newestById);
           SERIES_RESOLUTION_CACHE.set(cacheKey, res);
           return res;
         }
@@ -2240,7 +2717,7 @@ export const TournamentService = {
   async fetchPandaTournamentData(
     tournament: TournamentItem,
     token: string
-  ): Promise<{ matches?: Match[]; bracket?: TournamentBracket; standings?: StandingGroup[]; participants?: TournamentParticipant[]; resolvedSeries?: any } | null> {
+  ): Promise<{ matches?: Match[]; bracket?: TournamentBracket; standings?: StandingGroup[]; stages?: TournamentStage[]; participants?: TournamentParticipant[]; resolvedSeries?: any } | null> {
     const isWeb = Platform.OS === 'web';
     const cleanToken = token.trim();
     if (!cleanToken) return null;
@@ -2275,8 +2752,24 @@ export const TournamentService = {
       const seriesId = resolved?.seriesId || tournament.externalId;
       if (!seriesId) return null;
 
+      // Recordar la edición abierta desde un partido para futuras aperturas
+      // desde el catálogo (misma edición, sin heurísticas).
+      if (tournament.pinnedSeriesId && resolved?.seriesId) {
+        const yearFromName = resolved.fullName?.match(/\b(20\d\d)\b/);
+        const year =
+          typeof resolved.year === 'number'
+            ? resolved.year
+            : yearFromName
+            ? parseInt(yearFromName[1], 10)
+            : resolved.beginAt
+            ? new Date(resolved.beginAt).getFullYear()
+            : undefined;
+        LAST_KNOWN_SERIES.set(tournament.id, { seriesId: resolved.seriesId, year });
+      }
+
       // 2. Fases internas del torneo (Group A, Play-In, Playoffs...)
-      const stages = (await fetchPandaArray(`/series/${seriesId}/tournaments?per_page=50&sort=begin_at`)) || [];
+      const stageListRaw =
+        (await fetchPandaArray(`/series/${seriesId}/tournaments?per_page=50&sort=begin_at`)) || [];
 
       // 3. Cargar TODOS los partidos de la serie con paginación completa
       const allRawMatches: any[] = [];
@@ -2343,6 +2836,8 @@ export const TournamentService = {
           startTimeIso: scheduleDate || new Date().toISOString(),
           tier: tournament.tier,
           region: tournament.region,
+          masterTournamentId: tournament.id,
+          seriesId,
           teamA: {
             id: oppA?.id,
             name: nameA,
@@ -2370,8 +2865,14 @@ export const TournamentService = {
 
       if (matches.length === 0) return null;
 
-      // 4. Clasificaciones oficiales por fase (solo fases con tabla real)
-      const tableStages = (Array.isArray(stages) ? stages : [])
+      // 4. Fases internas construidas a partir de los partidos reales (Play-In,
+      //    Fase Suiza, Grupos, Playoffs...) con la tabla/cuadro de cada una.
+      const stageList = buildStagesFromMatches(matches, stageListRaw);
+
+      // 5. Clasificaciones oficiales por fase (solo fases con tabla real).
+      //    Se asignan a su fase correspondiente; si la API no ofrece tabla, se
+      //    conserva la calculada con los partidos de la propia fase.
+      const tableStages = (Array.isArray(stageListRaw) ? stageListRaw : [])
         .filter(
           (s: any) =>
             s &&
@@ -2381,7 +2882,7 @@ export const TournamentService = {
         )
         .slice(0, 8);
 
-      const officialGroups: StandingGroup[] = [];
+      const officialByStageId = new Map<string, StandingGroup>();
       if (tableStages.length > 0) {
         // Peticiones secuenciales con una pequeña pausa para respetar los límites de PandaScore
         const standingsRaw: (any[] | null)[] = [];
@@ -2405,30 +2906,49 @@ export const TournamentService = {
           const stageMatches = matches.filter(
             (m) => m.details?.stageId === stage.id || (stage.name && m.details?.stageName === stage.name)
           );
-          officialGroups.push(
+          officialByStageId.set(
+            String(stage.id),
             buildStandingGroupFromPanda(resolveStageGroupName(stage.name) || stage.name, entries, stageMatches)
           );
         });
       }
 
-      // Si la API no ofrece tabla oficial, se calcula a partir de los partidos reales
-      if (officialGroups.length > 0) {
-        const groupSortKey = (name: string) => {
-          if (/^grupo/i.test(name)) return `0-${name}`;
-          if (/play-?in/i.test(name)) return `1-${name}`;
-          if (/suiza|swiss/i.test(name)) return `2-${name}`;
-          if (/temporada|regular/i.test(name)) return `3-${name}`;
-          return `2-${name}`;
-        };
-        officialGroups.sort((a, b) => groupSortKey(a.groupName).localeCompare(groupSortKey(b.groupName), 'es'));
+      // Volcar las tablas oficiales en su fase correspondiente
+      for (const stage of stageList) {
+        const rawIds = new Set(
+          (stage.matches || [])
+            .map((m) => m.details?.stageId)
+            .filter((id): id is string | number => id !== undefined && id !== null)
+            .map(String)
+        );
+        const officialGroups = Array.from(rawIds)
+          .map((id) => officialByStageId.get(id))
+          .filter((g): g is StandingGroup => Boolean(g));
+        if (officialGroups.length > 0) {
+          if (stage.format === 'SWISS') applySwissZones(officialGroups);
+          stage.standings = officialGroups;
+        }
       }
-      const standings = officialGroups.length > 0 ? officialGroups : buildStandingsFromMatches(matches);
 
-      // 5. Cuadro de eliminatorias y participantes
-      const bracket = buildBracketFromMatches(matches) || projectBracketFromStandings(standings);
+      // Lista global de clasificaciones (compatibilidad con la vista heredada)
+      const stageTables = stageList.flatMap((s) => s.standings || []);
+      const fallbackStandings = buildStandingsFromMatches(matches);
+      const standings = stageTables.length > 0 ? stageTables : fallbackStandings;
+
+      // 6. Cuadro de eliminatorias real (sin proyecciones inventadas) y participantes
+      const bracket = buildBracketFromMatches(matches);
+      // Colorear la última tabla de clasificación (temporada regular / grupos) con
+      // las plazas del cuadro real de playoffs
+      const lastTableStage = stageList
+        .slice()
+        .reverse()
+        .find((s) => !s.bracket && (s.standings?.length || 0) > 0);
+      if (bracket && lastTableStage?.standings) {
+        applyBracketZonesToStandings(lastTableStage.standings, bracket);
+      }
       const participants = extractParticipantsFromMatches(matches);
 
-      return { matches, bracket, standings, participants, resolvedSeries: resolved };
+      return { matches, bracket, standings, stages: stageList, participants, resolvedSeries: resolved };
     } catch (e) {
       console.warn('Error fetching PandaScore tournament live data:', e);
       return null;

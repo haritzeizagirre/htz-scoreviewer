@@ -10,11 +10,12 @@ import {
   TouchableOpacity,
   BackHandler,
   Platform,
+  AppState,
   useWindowDimensions,
   NativeSyntheticEvent,
   NativeScrollEvent,
 } from 'react-native';
-import type { ViewStyle } from 'react-native';
+import type { ViewStyle, AppStateStatus } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   ChevronLeft,
@@ -173,6 +174,14 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   const [matches, setMatches] = useState<Match[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // true cuando ya se ha leído la configuración persistida (tokens, favoritos...).
+  // Hasta entonces no se lanza ninguna petición para no cargar con valores por defecto.
+  const [configReady, setConfigReady] = useState(false);
+  // Identificador de la última petición lanzada: evita que una respuesta antigua
+  // sobrescriba datos más recientes.
+  const requestSeqRef = useRef(0);
+  // Momento del último fetch completado con éxito (para decidir si conviene refrescar).
+  const lastLoadAtRef = useRef(0);
   const [selectedMatch, setSelectedMatch] = useState<Match | null>(null);
   const [selectedTournament, setSelectedTournament] = useState<TournamentItem | null>(null);
 
@@ -335,12 +344,16 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
         await storage.set('watch_config', nextConfig);
       } catch (err) {
         console.warn('Error loading storage:', err);
+      } finally {
+        // Continúe como continúe la lectura, la app ya puede empezar a cargar datos.
+        setConfigReady(true);
       }
     })();
   }, []);
 
   // Fetch matches
   const loadMatches = useCallback(async (forceRefresh = false) => {
+    const requestSeq = ++requestSeqRef.current;
     try {
       const data = await ScoreService.fetchAllMatches({
         pandaToken: watchConfig.pandaToken,
@@ -350,17 +363,41 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
         enabledGames: watchConfig.enabledGames,
         forceRefresh,
       });
+      // Si mientras tanto se ha lanzado otra petición (p. ej. con la configuración
+      // ya cargada), se descarta esta respuesta para no pisar datos más frescos.
+      if (requestSeq !== requestSeqRef.current) return;
+      lastLoadAtRef.current = Date.now();
       setMatches(data);
     } catch (err) {
+      if (requestSeq !== requestSeqRef.current) return;
       console.warn('Error loading matches:', err);
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (requestSeq === requestSeqRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [watchConfig]);
 
+  // Primera carga: se espera a tener la configuración persistida para lanzar una
+  // única petición con los tokens y favoritos reales del usuario.
   useEffect(() => {
+    if (!configReady) return;
     loadMatches();
+  }, [configReady, loadMatches]);
+
+  // Al volver a la app desde segundo plano, se recargan los datos automáticamente
+  // (salvo que se acaben de actualizar hace menos de un minuto).
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      const prevState = appStateRef.current;
+      appStateRef.current = nextState;
+      if (nextState !== 'active' || prevState === 'active') return;
+      if (Date.now() - lastLoadAtRef.current < 60_000) return;
+      loadMatches(true);
+    });
+    return () => subscription.remove();
   }, [loadMatches]);
 
   const onRefresh = () => {
@@ -387,7 +424,12 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     await storage.set('watch_config', newConfig);
   };
 
-  const handleOpenTournamentByLeague = (leagueName: string, game?: SportCategory) => {
+  const handleOpenTournamentByLeague = (
+    leagueName: string,
+    game?: SportCategory,
+    masterTournamentId?: string,
+    seriesId?: number | string
+  ) => {
     // 1. Extraer temporada / año / split explícito si viene en la cadena original (ej. "Summer 2026")
     const yearMatch = leagueName.match(/\b(202\d)\b/);
     const splitMatch = leagueName.match(/\b(Summer|Spring|Winter|Autumn|Fall)\b/i);
@@ -395,51 +437,87 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
       ? (splitMatch ? `${splitMatch[1]} ${yearMatch[1]}` : yearMatch[1])
       : undefined;
 
-    // 2. Limpiar nombre del torneo quitando fases, splits o temporadas (ej: " • Summer 2026", " - Spring")
+    // La serie exacta del partido se fija en el torneo abierto: así la página
+    // muestra siempre la edición correcta y nunca la de otro año.
+    const withMatchHints = (t: TournamentItem): TournamentItem => ({
+      ...t,
+      season: targetSeason || t.season,
+      ...(seriesId !== undefined && seriesId !== null ? { pinnedSeriesId: seriesId } : {}),
+    });
+
+    const all = ScoreService.getTournamentsCatalog();
+
+    // 2. Vía fiable: el partido ya conoce su torneo maestro (VCT Champions, Worlds...)
+    if (masterTournamentId) {
+      const byId = all.find((t) => t.id === masterTournamentId);
+      if (byId) {
+        setSelectedTournament(withMatchHints(byId));
+        return;
+      }
+    }
+
+    // 3. Resolver por reglas de juego (VCT Masters vs Champions, Worlds, LEC...)
+    //    antes de cualquier coincidencia difusa por nombre.
+    if (game) {
+      const ruleId = ScoreService.resolveMasterTournamentId(game, leagueName);
+      if (ruleId) {
+        const byRule = all.find((t) => t.id === ruleId);
+        if (byRule) {
+          setSelectedTournament(withMatchHints(byRule));
+          return;
+        }
+      }
+    }
+
+    const rawLower = leagueName.toLowerCase();
+    const gamePool = game ? all.filter((t) => t.game === game) : all;
+
+    // 4. Mejor torneo del catálogo cuyo nombre/shortName/slug aparezca en la
+    //    cadena original. Se exige coincidencia de 4+ caracteres y gana la más
+    //    larga (evita que un genérico como "VCT" abra VCT Masters).
+    let bestRaw: { tournament: TournamentItem; length: number } | null = null;
+    for (const t of gamePool) {
+      const variants = [t.name, t.shortName, t.slug]
+        .filter((v): v is string => Boolean(v))
+        .map((v) => v.toLowerCase().trim())
+        .filter((v) => v.length >= 4);
+      for (const v of variants) {
+        if (rawLower.includes(v) && (!bestRaw || v.length > bestRaw.length)) {
+          bestRaw = { tournament: t, length: v.length };
+        }
+      }
+    }
+    if (bestRaw) {
+      setSelectedTournament(withMatchHints(bestRaw.tournament));
+      return;
+    }
+
+    // 5. Limpiar nombre del torneo quitando fases, splits o temporadas (ej: " • Summer 2026", " - Spring")
     const cleanLeague = leagueName
       .replace(/\s*•.*$/, '')
       .replace(/\s*-\s*(Summer|Spring|Winter|Autumn|Fall|Stage\s*\d+|202\d).*$/i, '')
       .replace(/\s*\(.*\)$/, '')
       .trim();
-
     const cleanLower = cleanLeague.toLowerCase();
-    const all = ScoreService.getTournamentsCatalog();
 
-    // 3. Si se proporciona el juego/deporte (ej: LOL), buscar estrictamente en esa categoría
-    if (game) {
-      const sameGameTournaments = all.filter((t) => t.game === game);
-      const exactGameMatch = sameGameTournaments.find(
+    // Solo se intenta la coincidencia difusa si el nombre limpio es suficientemente
+    // específico: un "VCT" a secas no debe abrir VCT Masters.
+    if (cleanLower.length >= 5) {
+      const candidates = gamePool.filter(
         (t) =>
           t.name.toLowerCase() === cleanLower ||
           (t.shortName && t.shortName.toLowerCase() === cleanLower) ||
           t.name.toLowerCase().includes(cleanLower) ||
           cleanLower.includes(t.name.toLowerCase())
       );
-      if (exactGameMatch) {
-        setSelectedTournament({
-          ...exactGameMatch,
-          season: targetSeason || exactGameMatch.season,
-        });
+      if (candidates.length > 0) {
+        candidates.sort((a, b) => b.name.length - a.name.length);
+        setSelectedTournament(withMatchHints(candidates[0]));
         return;
       }
     }
 
-    // 4. Coincidencia general priorizando la cadena coincidente más larga (evita que "Masters" abra VCT Masters para LoL)
-    const matches = all.filter(
-      (t) =>
-        t.name.toLowerCase().includes(cleanLower) ||
-        cleanLower.includes(t.name.toLowerCase())
-    );
-    if (matches.length > 0) {
-      matches.sort((a, b) => b.name.length - a.name.length);
-      setSelectedTournament({
-        ...matches[0],
-        season: targetSeason || matches[0].season,
-      });
-      return;
-    }
-
-    // 5. Si es un torneo dinámico de API online, crear objeto de torneo para poder abrirlo
+    // 6. Si es un torneo dinámico de API online, crear objeto de torneo para poder abrirlo
     const dynTournament: TournamentItem = {
       id: `dyn-${cleanLower.replace(/[^a-z0-9]/g, '-')}`,
       name: cleanLeague,
@@ -447,8 +525,9 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
       game: game || 'VALORANT',
       tier: 'A',
       region: 'GLOBAL',
-      season: targetSeason || '2026',
+      season: targetSeason || String(new Date().getFullYear()),
       description: `Competición oficial de ${cleanLeague}`,
+      ...(seriesId !== undefined && seriesId !== null ? { pinnedSeriesId: seriesId } : {}),
     };
     setSelectedTournament(dynTournament);
   };

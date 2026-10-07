@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, Image, TouchableOpacity } from 'react-native';
 import { Target, Ban, ChevronDown, ChevronUp } from 'lucide-react-native';
+import { MarqueeText } from './MarqueeText';
 import { htzTokens } from './htz/tokens';
 
 export interface MapVetoMap {
@@ -133,9 +134,11 @@ export const MapVetoSummary: React.FC<MapVetoSummaryProps> = ({
         <View style={styles.body}>
           {mapRows.map((r, idx) => (
             <View key={idx} style={[styles.mapRow, idx % 2 === 1 && styles.mapRowAlt]}>
-              <Text style={styles.mapName} numberOfLines={1}>
-                {r.mapName}
-              </Text>
+              <MarqueeText
+                text={r.mapName}
+                textStyle={styles.mapName}
+                containerStyle={styles.mapNameMarquee}
+              />
               {r.hasScore ? (
                 <Text style={styles.score}>
                   {r.scoreA ?? '-'}-{r.scoreB ?? '-'}
@@ -231,7 +234,10 @@ const styles = StyleSheet.create({
     color: htzTokens.colors.onSurface,
     fontSize: 12,
     fontWeight: '700',
+  },
+  mapNameMarquee: {
     flex: 1,
+    minWidth: 0,
   },
   score: {
     color: htzTokens.colors.onSurface,

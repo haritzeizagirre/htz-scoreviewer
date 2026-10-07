@@ -10,6 +10,7 @@ import {
 import { TournamentParticipant, SportCategory, PlayerInfo } from '../services/types';
 import { HtzCard, HtzInput, HtzBadge } from './htz';
 import { htzTokens } from './htz/tokens';
+import { MarqueeText } from './MarqueeText';
 import { Shield, ChevronDown, ChevronUp, User, Globe, Search } from 'lucide-react-native';
 
 interface TournamentTeamsViewProps {
@@ -94,7 +95,11 @@ export const TournamentTeamsView: React.FC<TournamentTeamsViewProps> = ({
 
                 <View style={styles.teamMainInfo}>
                   <View style={styles.teamTitleRow}>
-                    <Text style={styles.teamName}>{team.name}</Text>
+                    <MarqueeText
+                      text={team.name}
+                      textStyle={styles.teamName}
+                      containerStyle={styles.teamNameMarquee}
+                    />
                     {team.shortName && team.shortName !== team.name && (
                       <Text style={styles.teamShortName}>({team.shortName})</Text>
                     )}
@@ -141,9 +146,11 @@ export const TournamentTeamsView: React.FC<TournamentTeamsViewProps> = ({
                         </View>
                         <View style={styles.playerDetails}>
                           <View style={styles.playerNameRow}>
-                            <Text style={styles.playerNickname}>
-                              {player.nickname || player.name}
-                            </Text>
+                            <MarqueeText
+                              text={player.nickname || player.name}
+                              textStyle={styles.playerNickname}
+                              containerStyle={styles.playerNicknameMarquee}
+                            />
                             {player.nationality && (
                               <Text style={styles.playerNat}>({player.nationality})</Text>
                             )}
@@ -222,6 +229,10 @@ const styles = StyleSheet.create({
     color: htzTokens.colors.onSurface,
     fontSize: 14,
     fontWeight: '800',
+  },
+  teamNameMarquee: {
+    flex: 1,
+    minWidth: 0,
   },
   teamShortName: {
     color: htzTokens.colors.outline,
@@ -318,6 +329,10 @@ const styles = StyleSheet.create({
     color: htzTokens.colors.onSurface,
     fontSize: 12,
     fontWeight: '800',
+  },
+  playerNicknameMarquee: {
+    flexShrink: 1,
+    minWidth: 0,
   },
   playerNat: {
     color: htzTokens.colors.outline,

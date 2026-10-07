@@ -32,6 +32,7 @@ import {
 import { ScoreService, isGameCategoryEnabled } from '../services/scoreService';
 import { TournamentDetailModal } from './TournamentDetailModal';
 import { TournamentLogo } from './TournamentLogo';
+import { MarqueeText } from './MarqueeText';
 import {
   HtzCard,
   HtzTabs,
@@ -389,13 +390,9 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
 
                     {/* Información */}
                     <View style={styles.itemInfo}>
-                      <Text style={styles.itemTitle} numberOfLines={1}>
-                        {tournament.name}
-                      </Text>
+                      <MarqueeText text={tournament.name} textStyle={styles.itemTitle} />
                       {tournament.description ? (
-                        <Text style={styles.itemSubtitle} numberOfLines={1}>
-                          {tournament.description}
-                        </Text>
+                        <MarqueeText text={tournament.description} textStyle={styles.itemSubtitle} />
                       ) : null}
 
                       <View style={styles.itemBadgesRow}>
@@ -482,15 +479,15 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
 
                     {/* Información */}
                     <View style={styles.itemInfo}>
-                      <Text style={styles.itemTitle} numberOfLines={1}>
-                        {team.name}
-                      </Text>
+                      <MarqueeText text={team.name} textStyle={styles.itemTitle} />
                       {team.location ? (
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                           <MapPin size={11} color={htzTokens.colors.outline} />
-                          <Text style={styles.itemSubtitle} numberOfLines={1}>
-                            {team.location}
-                          </Text>
+                          <MarqueeText
+                            text={team.location}
+                            textStyle={styles.itemSubtitle}
+                            containerStyle={styles.itemSubtitleFlex}
+                          />
                         </View>
                       ) : null}
 
@@ -672,6 +669,10 @@ const styles = StyleSheet.create({
     color: htzTokens.colors.outline,
     fontSize: 11,
     marginBottom: 6,
+  },
+  itemSubtitleFlex: {
+    flex: 1,
+    minWidth: 0,
   },
   itemBadgesRow: {
     flexDirection: 'row',

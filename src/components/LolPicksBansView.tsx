@@ -11,6 +11,7 @@ import {
 import { ExternalLink, Shield, RefreshCw, AlertTriangle, Clock, Ban, Sparkles } from 'lucide-react-native';
 import { LolTeamGame, LolPick } from '../services/types';
 import { LolScraperService, LolMatchResult } from '../services/lolScraperService';
+import { MarqueeText } from './MarqueeText';
 import { HtzChip, HtzButton } from './htz';
 import { htzTokens } from './htz/tokens';
 
@@ -216,9 +217,11 @@ export const LolPicksBansView: React.FC<LolPicksBansViewProps> = ({
           {teamBName}
         </Text>
         {data.tournament ? (
-          <Text style={styles.tournamentText} numberOfLines={1}>
-            {data.tournament}
-          </Text>
+          <MarqueeText
+            text={data.tournament}
+            textStyle={styles.tournamentText}
+            align="center"
+          />
         ) : null}
       </View>
 
@@ -310,9 +313,11 @@ const TeamGameBlock: React.FC<{
 }> = ({ team, failedIcons, onIconFail }) => (
   <View style={styles.teamSection}>
     <View style={styles.teamHeaderRow}>
-      <Text style={styles.teamTitle} numberOfLines={1}>
-        {team.teamName}
-      </Text>
+      <MarqueeText
+        text={team.teamName}
+        textStyle={styles.teamTitle}
+        containerStyle={styles.teamTitleMarquee}
+      />
       {team.kills || team.gold ? (
         <Text style={styles.teamStats}>
           {team.kills ? `${team.kills} kills` : ''}
@@ -338,14 +343,12 @@ const TeamGameBlock: React.FC<{
         ]}
       >
         <ChampImage pick={p} size={30} failedIcons={failedIcons} onIconFail={onIconFail} />
-        <View style={{ flex: 1 }}>
-          <Text style={styles.playerName} numberOfLines={1}>
-            {p.playerName || '-'}
-          </Text>
-          <Text style={styles.champName} numberOfLines={1}>
-            {p.champion}
-            {p.cs ? ` · ${p.cs} CS` : ''}
-          </Text>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <MarqueeText text={p.playerName || '-'} textStyle={styles.playerName} />
+          <MarqueeText
+            text={`${p.champion}${p.cs ? ` · ${p.cs} CS` : ''}`}
+            textStyle={styles.champName}
+          />
         </View>
         {p.kills !== undefined ? (
           <Text style={styles.kdaText}>
@@ -440,7 +443,8 @@ const styles = StyleSheet.create({
     borderBottomColor: '#333333',
     gap: 8,
   },
-  teamTitle: { color: htzTokens.colors.onSurface, fontSize: 13, fontWeight: '800', letterSpacing: 0.3, flex: 1 },
+  teamTitle: { color: htzTokens.colors.onSurface, fontSize: 13, fontWeight: '800', letterSpacing: 0.3 },
+  teamTitleMarquee: { flex: 1, minWidth: 0 },
   teamStats: { color: htzTokens.colors.outline, fontSize: 10, fontWeight: '600' },
   winBadge: { backgroundColor: '#0C5A29', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
   winBadgeText: { color: '#FFF', fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },

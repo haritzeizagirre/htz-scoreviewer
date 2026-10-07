@@ -246,6 +246,9 @@ async function findSeriesGameId(
   const when = valid ? base : new Date();
   const season = when.getFullYear() - 2010; // S16 = 2026
   const dateStr = dateOnly(when);
+  // El partido está en juego (o es inminente): las filas muy alejadas en fecha
+  // no pueden ser su serie aunque coincidan los dos equipos (p. ej. una revancha).
+  const matchIsRecent = valid && Math.abs(Date.now() - when.getTime()) < 12 * 3600 * 1000;
 
   let tournaments: GolTournament[] = [];
   try {
@@ -267,23 +270,44 @@ async function findSeriesGameId(
     }
 
     let best: GolMatchRow | null = null;
-    let bestScore = -1;
+    let bestScore = -Infinity;
     for (const row of rows) {
-      const direct = nameScore(teamA, row.team1) + nameScore(teamB, row.team2);
-      const swapped = nameScore(teamA, row.team2) + nameScore(teamB, row.team1);
-      let s = Math.max(direct, swapped);
+      // Deben aparecer LOS DOS equipos en la fila: una fila donde solo coincide
+      // uno (p. ej. un partido anterior de FlyQuest vs Natus Vincere) es otra serie.
+      const a1 = nameScore(teamA, row.team1);
+      const b2 = nameScore(teamB, row.team2);
+      const a2 = nameScore(teamA, row.team2);
+      const b1 = nameScore(teamB, row.team1);
+      const directSum = a1 + b2;
+      const swapSum = a2 + b1;
+      const useSwapped = swapSum > directSum;
+      const pairSum = useSwapped ? swapSum : directSum;
+      const pairMin = useSwapped ? Math.min(a2, b1) : Math.min(a1, b2);
+      if (pairMin < 1 || pairSum < 3) continue;
+
+      let s = pairSum * 10;
+
       if (valid && row.date) {
-        const diff = Math.abs(new Date(row.date).getTime() - when.getTime());
-        if (diff < 36 * 3600 * 1000) s += 2;
-        else if (diff < 4 * 24 * 3600 * 1000) s += 1;
+        const rowMs = Date.parse(row.date);
+        if (!isNaN(rowMs)) {
+          const diffHours = Math.abs(rowMs - when.getTime()) / 3600000;
+          if (matchIsRecent && diffHours > 36) continue;
+          if (diffHours <= 18) s += 12;
+          else if (diffHours <= 40) s += 6;
+          else if (diffHours <= 4 * 24) s += 1;
+          else s -= 6;
+          // Desempate fino: cuanto más cerca en el tiempo, mejor
+          s -= Math.min(diffHours, 24 * 14) / 500;
+        }
       }
+
       if (s > bestScore) {
         bestScore = s;
         best = row;
       }
     }
 
-    return best && bestScore >= 4
+    return best && bestScore >= 30
       ? { gameId: best.gameId, tournamentName: tournament.name, row: best }
       : null;
   };
@@ -533,7 +557,29 @@ function buildMatchData(
 // ---------------------------------------------------------------------------
 // Caché y servicio
 // ---------------------------------------------------------------------------
-const MATCH_CACHE = new Map<string, LolMatchData | null>();
+interface MatchCacheEntry {
+  data: LolMatchData | null;
+  at: number;
+}
+
+const MATCH_CACHE = new Map<string, MatchCacheEntry>();
+// Un "no encontrado" no se cachea para siempre: los partidos en directo aparecen
+// en gol.gg al poco de empezar, así que se reintenta la búsqueda tras un rato.
+const NEGATIVE_CACHE_TTL_MS = 90 * 1000;
+
+/** Comprueba que la página del game pertenece realmente a los dos equipos pedidos. */
+function teamsMatchPage(teamA: string, teamB: string, page: GolGamePage): boolean {
+  const blue = page.blue.name;
+  const red = page.red.name;
+  if (!blue || !red) return false;
+  const aBlue = nameScore(teamA, blue);
+  const bBlue = nameScore(teamB, blue);
+  const aRed = nameScore(teamA, red);
+  const bRed = nameScore(teamB, red);
+  const sum = Math.max(aBlue + bRed, aRed + bBlue);
+  const min = Math.max(Math.min(aBlue, bRed), Math.min(aRed, bBlue));
+  return min >= 1 && sum >= 3;
+}
 
 function cacheKeyFor(teamA: string, teamB: string, startTimeIso?: string): string {
   return `${teamA.toLowerCase().trim()}_vs_${teamB.toLowerCase().trim()}_${(startTimeIso || '').slice(0, 10)}`;
@@ -552,6 +598,15 @@ async function loadMatch(
   // Página del primer game de la serie
   const firstHtml = await fetchText(`${GOL_BASE}/game/stats/${found.gameId}/page-game/`);
   const firstPage = parseGamePage(firstHtml);
+
+  // Verificación final: la página debe ser de los dos equipos pedidos. Evita
+  // mostrar estadísticas de otra serie si la búsqueda acertó a medias.
+  if (!teamsMatchPage(teamA, teamB, firstPage)) {
+    console.warn(
+      `gol.gg: la página del game ${found.gameId} (${firstPage.blue.name} vs ${firstPage.red.name}) no corresponde a ${teamA} vs ${teamB}`
+    );
+    return null;
+  }
 
   // Games de la serie (ordenados); máximo 5
   const ids = (firstPage.seriesGameIds.length > 0 ? firstPage.seriesGameIds : [found.gameId]).slice(0, 5);
@@ -588,13 +643,14 @@ export const LolScraperService = {
     leagueName?: string
   ): Promise<LolMatchResult> {
     const key = cacheKeyFor(teamA, teamB, startTimeIso);
-    if (MATCH_CACHE.has(key)) {
-      return { data: MATCH_CACHE.get(key)!, reason: 'ok' };
+    const cached = MATCH_CACHE.get(key);
+    if (cached && (cached.data || Date.now() - cached.at < NEGATIVE_CACHE_TTL_MS)) {
+      return { data: cached.data, reason: cached.data ? 'ok' : 'not_found' };
     }
 
     try {
       const data = await withTimeout(loadMatch(teamA, teamB, startTimeIso, leagueName), OVERALL_TIMEOUT_MS);
-      MATCH_CACHE.set(key, data);
+      MATCH_CACHE.set(key, { data, at: Date.now() });
       return { data, reason: data ? 'ok' : 'not_found' };
     } catch (err) {
       console.warn('LolScraperService:', err);

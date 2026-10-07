@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { ChevronDown, Check } from 'lucide-react-native';
 import { htzTokens } from './tokens';
+import { MarqueeText } from '../MarqueeText';
 
 export interface HtzSelectOption {
   value: string;
@@ -71,17 +72,15 @@ export const HtzSelect: React.FC<HtzSelectProps> = ({
           {selectedOption?.icon ? (
             <View style={styles.iconContainer}>{selectedOption.icon}</View>
           ) : null}
-          <Text
-            style={[
+          <MarqueeText
+            text={selectedOption ? selectedOption.label : placeholder}
+            textStyle={[
               styles.fieldText,
               compact && styles.fieldTextCompact,
               !selectedOption && styles.placeholderText,
             ]}
-            numberOfLines={1}
-            ellipsizeMode="tail"
-          >
-            {selectedOption ? selectedOption.label : placeholder}
-          </Text>
+            containerStyle={styles.fieldTextMarquee}
+          />
         </View>
 
         <ChevronDown
@@ -216,7 +215,10 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     color: htzTokens.colors.onSurface,
+  },
+  fieldTextMarquee: {
     flex: 1,
+    minWidth: 0,
   },
   fieldTextCompact: {
     fontSize: 12,

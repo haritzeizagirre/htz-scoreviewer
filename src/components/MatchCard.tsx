@@ -5,6 +5,7 @@ import { Match, MatchRegion, SportCategory } from '../services/types';
 import { formatMatchSchedule } from '../services/dateUtils';
 import { HtzCard, HtzBadge, htzTokens } from './htz';
 import { GameLogo } from './GameLogo';
+import { MarqueeText } from './MarqueeText';
 
 function getRegionBadge(region?: MatchRegion): string | null {
   switch (region) {
@@ -26,7 +27,12 @@ function getRegionBadge(region?: MatchRegion): string | null {
 interface MatchCardProps {
   match: Match;
   onPress: () => void;
-  onSelectTournament?: (leagueName: string, game?: SportCategory) => void;
+  onSelectTournament?: (
+    leagueName: string,
+    game?: SportCategory,
+    masterTournamentId?: string,
+    seriesId?: number | string
+  ) => void;
 }
 
 export const MatchCard: React.FC<MatchCardProps> = ({ match, onPress, onSelectTournament }) => {
@@ -159,14 +165,15 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onPress, onSelectTo
                 const fullLeagueStr = match.details?.tournamentStage
                   ? `${match.league} • ${match.details.tournamentStage}`
                   : match.league;
-                onSelectTournament(fullLeagueStr, match.game);
+                onSelectTournament(fullLeagueStr, match.game, match.masterTournamentId, match.seriesId);
               }
             }}
             hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
           >
-            <Text style={[styles.leagueName, onSelectTournament && styles.leagueNameClickable]} numberOfLines={1}>
-              {match.league}
-            </Text>
+            <MarqueeText
+              text={match.league}
+              textStyle={[styles.leagueName, onSelectTournament && styles.leagueNameClickable]}
+            />
           </TouchableOpacity>
 
           {match.isFavTournament && (
@@ -211,9 +218,11 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onPress, onSelectTo
         </View>
 
         {stageText ? (
-          <Text style={styles.stageTag} numberOfLines={1}>
-            {stageText}
-          </Text>
+          <MarqueeText
+            text={stageText}
+            textStyle={styles.stageTag}
+            containerStyle={styles.stageTagMarquee}
+          />
         ) : null}
       </View>
 
@@ -241,15 +250,14 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onPress, onSelectTo
                 {match.teamA.isFav && (
                   <Star size={13} color="#FBBF24" fill="#FBBF24" style={{ marginRight: 5 }} />
                 )}
-                <Text
-                  style={[
+                <MarqueeText
+                  text={match.teamA.name}
+                  textStyle={[
                     styles.teamName,
                     isAWinning && styles.winningTeamName,
                   ]}
-                  numberOfLines={1}
-                >
-                  {match.teamA.name}
-                </Text>
+                  containerStyle={styles.teamNameMarquee}
+                />
               </View>
               <Text style={styles.shortText}>{match.teamA.shortName}</Text>
             </View>
@@ -298,15 +306,14 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onPress, onSelectTo
                 {match.teamB.isFav && (
                   <Star size={13} color="#FBBF24" fill="#FBBF24" style={{ marginRight: 5 }} />
                 )}
-                <Text
-                  style={[
+                <MarqueeText
+                  text={match.teamB.name}
+                  textStyle={[
                     styles.teamName,
                     isBWinning && styles.winningTeamName,
                   ]}
-                  numberOfLines={1}
-                >
-                  {match.teamB.name}
-                </Text>
+                  containerStyle={styles.teamNameMarquee}
+                />
               </View>
               <Text style={styles.shortText}>{match.teamB.shortName}</Text>
             </View>
@@ -474,6 +481,10 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
     color: htzTokens.colors.outline,
+  },
+  stageTagMarquee: {
+    maxWidth: '48%',
+    flexShrink: 1,
     marginLeft: 8,
   },
   teamsListContainer: {
@@ -529,6 +540,10 @@ const styles = StyleSheet.create({
   nameAndFav: {
     flexDirection: 'row',
     alignItems: 'center',
+  },
+  teamNameMarquee: {
+    flex: 1,
+    minWidth: 0,
   },
   teamName: {
     fontSize: 14,

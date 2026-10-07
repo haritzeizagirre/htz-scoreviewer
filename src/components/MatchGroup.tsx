@@ -28,7 +28,12 @@ interface MatchGroupProps {
   /** Partidos del mismo torneo (o de la sección de favoritos), en orden de visualización. */
   matches: Match[];
   onSelectMatch: (match: Match) => void;
-  onSelectTournament?: (leagueName: string, game?: SportCategory) => void;
+  onSelectTournament?: (
+    leagueName: string,
+    game?: SportCategory,
+    masterTournamentId?: string,
+    seriesId?: number | string
+  ) => void;
   /**
    * 'tournament' (por defecto): cabecera con los datos de la competición.
    * 'favorites': sección especial de partidos de equipos favoritos.
@@ -46,6 +51,29 @@ export const MatchGroup: React.FC<MatchGroupProps> = ({
   onSelectTournament,
   variant = 'tournament',
 }) => {
+  // Orden garantizado dentro del grupo: primero los directos, después los próximos
+  // por cercanía y, al final, los resultados más recientes.
+  const orderedMatches = React.useMemo(() => {
+    const statusRank = (status: Match['status']): number =>
+      status === 'LIVE' ? 0 : status === 'UPCOMING' ? 1 : 2;
+
+    return matches.slice().sort((a, b) => {
+      const rankDiff = statusRank(a.status) - statusRank(b.status);
+      if (rankDiff !== 0) return rankDiff;
+
+      const timeA = new Date(a.startTimeIso).getTime();
+      const timeB = new Date(b.startTimeIso).getTime();
+      const validA = !isNaN(timeA);
+      const validB = !isNaN(timeB);
+
+      if (!validA && !validB) return 0;
+      if (!validA) return 1;
+      if (!validB) return -1;
+
+      return a.status === 'FINISHED' ? timeB - timeA : timeA - timeB;
+    });
+  }, [matches]);
+
   if (matches.length === 0) return null;
 
   const sample = matches[0];
@@ -56,7 +84,7 @@ export const MatchGroup: React.FC<MatchGroupProps> = ({
     const fullLeagueStr = sample.details?.tournamentStage
       ? `${sample.league} • ${sample.details.tournamentStage}`
       : sample.league;
-    onSelectTournament(fullLeagueStr, sample.game);
+    onSelectTournament(fullLeagueStr, sample.game, sample.masterTournamentId, sample.seriesId);
   };
 
   return (
@@ -138,11 +166,11 @@ export const MatchGroup: React.FC<MatchGroupProps> = ({
 
       {/* Partidos del grupo como filas compactas */}
       <View>
-        {matches.map((m, i) => (
+        {orderedMatches.map((m, i) => (
           <MatchRow
             key={m.id}
             match={m}
-            isLast={i === matches.length - 1}
+            isLast={i === orderedMatches.length - 1}
             showGame={isFavorites}
             onPress={() => onSelectMatch(m)}
           />

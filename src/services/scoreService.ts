@@ -16,6 +16,10 @@ import {
 } from './types';
 import { formatMatchSchedule } from './dateUtils';
 
+// Margen máximo (en horas) para mostrar partidos finalizados en la pantalla principal.
+// Evita que se cuelen resultados de hace casi una semana en "Finalizados".
+const FINISHED_MATCHES_MAX_AGE_HOURS = 48;
+
 export function cleanTeamName(name: string): string {
   return (name || '')
     .toLowerCase()
@@ -1687,6 +1691,18 @@ export const MASTER_TOURNAMENTS: TournamentItem[] = [
     externalId: '10993',
     description: 'Torneo europeo de las mejores ERLs regionales',
   },
+  {
+    // Sin leagueId fijo: la liga se resuelve por nombre en PandaScore. Formato
+    // variable por edición (fase suiza, liguillas de clasificación y playoffs).
+    id: 'lol-demacia-cup',
+    name: 'Demacia Cup',
+    shortName: 'Demacia',
+    slug: 'demacia-cup',
+    game: 'LOL',
+    tier: 'A',
+    region: 'ASIA',
+    description: 'Copa de pretemporada china organizada por Huya',
+  },
 
   // COUNTER-STRIKE 2
   {
@@ -2732,12 +2748,22 @@ export const ScoreService = {
       };
     });
 
+    // Solo resultados recientes: se descartan los partidos finalizados que superen
+    // el margen configurado (48 h). Los partidos sin fecha fiable se conservan.
+    const finishedCutoff = Date.now() - FINISHED_MATCHES_MAX_AGE_HOURS * 60 * 60 * 1000;
+    const recentTagged = tagged.filter((m) => {
+      if (m.status !== 'FINISHED' || !m.startTimeIso) return true;
+      const startMs = new Date(m.startTimeIso).getTime();
+      if (isNaN(startMs)) return true;
+      return startMs >= finishedCutoff;
+    });
+
     // Ordenación profesional:
     // - 1. En Directo (LIVE) arriba de todo
     // - 2. Equipos favoritos destacados
     // - 3. Próximos partidos ordenados por cercanía (los más próximos primero)
     // - 4. Partidos finalizados ordenados por los más recientes primero
-    tagged.sort((a, b) => {
+    recentTagged.sort((a, b) => {
       if (a.status === 'LIVE' && b.status !== 'LIVE') return -1;
       if (b.status === 'LIVE' && a.status !== 'LIVE') return 1;
 
@@ -2760,7 +2786,7 @@ export const ScoreService = {
       return 0;
     });
 
-    return tagged;
+    return recentTagged;
   },
 
   async fetchPandaScore(
@@ -3002,6 +3028,7 @@ export const ScoreService = {
         region,
         masterTournamentId:
           resolveMasterTournamentId(category, leagueName, tournamentName, serieName) || undefined,
+        seriesId: item.serie?.id ?? item.serie_id,
         teamA: {
           id: oppA.id,
           name: oppA.name || 'Equipo A',
@@ -3766,14 +3793,34 @@ export const ScoreService = {
     const tn = tournament.name.toLowerCase();
     const tShort = (tournament.shortName || '').toLowerCase();
     const tSlug = (tournament.slug || '').toLowerCase();
+
+    // Coincidencia por palabra completa (evita que "VCT" incluya partidos de
+    // cualquier evento VCT, como cuando se abría Masters con el texto genérico).
+    const containsWord = (haystack: string, needle: string) => {
+      if (!needle || needle.length < 4) return false;
+      const idx = haystack.indexOf(needle);
+      if (idx < 0) return false;
+      const before = idx === 0 ? ' ' : haystack[idx - 1];
+      const after = idx + needle.length >= haystack.length ? ' ' : haystack[idx + needle.length];
+      return !/[a-z0-9]/.test(before) && !/[a-z0-9]/.test(after);
+    };
+
     return allMatches.filter((m) => {
       if (m.game !== tournament.game) return false;
+      // Vía fiable: el partido conoce su torneo maestro
+      if (m.masterTournamentId && m.masterTournamentId === tournament.id) return true;
+
       const ml = m.league.toLowerCase();
       const ms = (m.details?.tournamentStage || '').toLowerCase();
-      if (ml.includes(tn) || tn.includes(ml) || (tShort && (ml.includes(tShort) || tShort.includes(ml))) || ms.includes(tn)) {
+      if (
+        containsWord(ml, tn) ||
+        containsWord(tn, ml) ||
+        containsWord(ml, tShort) ||
+        containsWord(ms, tn)
+      ) {
         return true;
       }
-      if (tSlug && ml.includes(tSlug)) return true;
+      if (tSlug && containsWord(ml, tSlug)) return true;
       if ((tournament.id === 'foot-PD' || tShort === 'laliga') && (ml.includes('laliga') || ml.includes('primera division'))) {
         return true;
       }

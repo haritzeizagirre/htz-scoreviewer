@@ -17,6 +17,7 @@ import {
 } from 'lucide-react-native';
 import { HtzCard, HtzToggle, HtzButton, HtzChip } from './htz';
 import { htzTokens } from './htz/tokens';
+import { MarqueeText } from './MarqueeText';
 import { SportCategory } from '../services/types';
 import { GameLogo } from './GameLogo';
 
@@ -141,13 +142,11 @@ export const GameManagementModal: React.FC<GameManagementModalProps> = ({
                       <View style={styles.gameIconContainer}>
                         <GameLogo game={item.sport} size={18} />
                       </View>
-                      <View style={{ flex: 1, marginLeft: 10 }}>
+                      <View style={{ flex: 1, marginLeft: 10, minWidth: 0 }}>
                         <Text style={[styles.gameName, !isEnabled && styles.gameNameDisabled]}>
                           {item.name}
                         </Text>
-                        <Text style={styles.gameDesc} numberOfLines={1}>
-                          {item.description}
-                        </Text>
+                        <MarqueeText text={item.description} textStyle={styles.gameDesc} />
                       </View>
                     </View>
                     <HtzToggle

@@ -12,6 +12,7 @@ import {
 import { ExternalLink, Shield, Flame, Clock } from 'lucide-react-native';
 import { R6MatchData, R6PlayerStats } from '../services/types';
 import { R6StatsService } from '../services/r6StatsService';
+import { MarqueeText } from './MarqueeText';
 import { MapVetoSummary } from './MapVetoSummary';
 import { HtzChip, HtzButton } from './htz';
 import { htzTokens } from './htz/tokens';
@@ -258,9 +259,11 @@ function renderPlayerTable(players: R6PlayerStats[]) {
                     </Text>
                   </View>
                 )}
-                <Text style={styles.playerName} numberOfLines={1}>
-                  {p.name}
-                </Text>
+                <MarqueeText
+                  text={p.name}
+                  textStyle={styles.playerName}
+                  containerStyle={styles.playerNameMarquee}
+                />
               </View>
 
               {/* K / D */}
@@ -492,7 +495,10 @@ const styles = StyleSheet.create({
     color: htzTokens.colors.onSurface,
     fontSize: 11,
     fontWeight: '700',
+  },
+  playerNameMarquee: {
     flex: 1,
+    minWidth: 0,
   },
   kdaText: {
     fontWeight: '600',

@@ -21,6 +21,7 @@ import {
 } from 'lucide-react-native';
 import { VlrMatchData, VlrMapData, VlrPlayerStats } from '../services/types';
 import { VlrScraperService } from '../services/vlrScraperService';
+import { MarqueeText } from './MarqueeText';
 import { HtzCard, HtzChip, HtzButton, HtzBadge } from './htz';
 import { htzTokens } from './htz/tokens';
 import { MapVetoSummary } from './MapVetoSummary';
@@ -285,10 +286,8 @@ function renderPlayerTable(players: VlrPlayerStats[]) {
                     <Text style={styles.countryCodePillText}>{p.countryCode.toUpperCase()}</Text>
                   </View>
                 ) : null}
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.playerName} numberOfLines={1}>
-                    {p.name}
-                  </Text>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <MarqueeText text={p.name} textStyle={styles.playerName} />
                   {p.teamTag ? (
                     <Text style={styles.playerTag}>{p.teamTag}</Text>
                   ) : null}

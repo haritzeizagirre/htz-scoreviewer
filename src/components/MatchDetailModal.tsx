@@ -32,6 +32,7 @@ import { VlrScoreboardView } from './VlrScoreboardView';
 import { R6ScoreboardView } from './R6ScoreboardView';
 import { LolPicksBansView } from './LolPicksBansView';
 import { GameLogo } from './GameLogo';
+import { MarqueeText } from './MarqueeText';
 import {
   HtzCard,
   HtzBadge,
@@ -45,7 +46,12 @@ interface MatchDetailModalProps {
   visible: boolean;
   onClose: () => void;
   pandaToken?: string;
-  onSelectTournament?: (leagueName: string, game?: SportCategory) => void;
+  onSelectTournament?: (
+    leagueName: string,
+    game?: SportCategory,
+    masterTournamentId?: string,
+    seriesId?: number | string
+  ) => void;
 }
 
 /** Juegos con pestaña de estadísticas dedicada (gol.gg / VLR / R6). */
@@ -162,14 +168,17 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
             onPress={() => {
               if (onSelectTournament && match) {
                 onClose();
-                onSelectTournament(match.league, match.game);
+                onSelectTournament(match.league, match.game, match.masterTournamentId, match.seriesId);
               }
             }}
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           >
-            <Text style={styles.appBarTitle} numberOfLines={1}>
-              {match.league}
-            </Text>
+            <MarqueeText
+              text={match.league}
+              textStyle={styles.appBarTitle}
+              containerStyle={styles.appBarTitleMarquee}
+              align="center"
+            />
           </TouchableOpacity>
 
           <View style={styles.appBarRight}>
@@ -214,9 +223,12 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
             </View>
             <View style={styles.minNameRow}>
               {match.teamA.isFav && <Star size={11} color="#FBBF24" fill="#FBBF24" />}
-              <Text style={styles.minTeamName} numberOfLines={1}>
-                {match.teamA.name}
-              </Text>
+              <MarqueeText
+                text={match.teamA.name}
+                textStyle={styles.minTeamName}
+                containerStyle={styles.minTeamNameMarquee}
+                align="center"
+              />
             </View>
           </View>
 
@@ -256,9 +268,12 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
               )}
             </View>
             <View style={styles.minNameRow}>
-              <Text style={styles.minTeamName} numberOfLines={1}>
-                {match.teamB.name}
-              </Text>
+              <MarqueeText
+                text={match.teamB.name}
+                textStyle={styles.minTeamName}
+                containerStyle={styles.minTeamNameMarquee}
+                align="center"
+              />
               {match.teamB.isFav && <Star size={11} color="#FBBF24" fill="#FBBF24" />}
             </View>
           </View>
@@ -607,6 +622,9 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
       fontWeight: '700',
       textAlign: 'center',
     },
+    appBarTitleMarquee: {
+      alignSelf: 'stretch',
+    },
     appBarRight: {
       minWidth: 50,
       alignItems: 'flex-end',
@@ -651,12 +669,17 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
       alignItems: 'center',
       gap: 3,
       justifyContent: 'center',
+      width: '100%',
     },
     minTeamName: {
       fontSize: 12,
       fontWeight: '700',
       color: htzTokens.colors.onSurface,
       textAlign: 'center',
+    },
+    minTeamNameMarquee: {
+      flex: 1,
+      minWidth: 0,
     },
     minScoreCenter: {
       flex: 1,

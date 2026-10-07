@@ -102,6 +102,8 @@ export interface Match {
   region?: MatchRegion;
   /** ID del torneo maestro del catálogo (MASTER_TOURNAMENTS) al que pertenece el partido. */
   masterTournamentId?: string;
+  /** Serie exacta de PandaScore a la que pertenece el partido (edición concreta). */
+  seriesId?: number | string;
   teamA: MatchTeam;
   teamB: MatchTeam;
   isFallback?: boolean;
@@ -152,6 +154,11 @@ export interface TournamentItem {
   isFav?: boolean;
   externalId?: number | string;
   leagueId?: number | string;
+  /**
+   * Serie exacta (edición) fijada al abrir el torneo desde un partido concreto.
+   * Tiene prioridad sobre cualquier resolución por año o nombre.
+   */
+  pinnedSeriesId?: number | string;
   country?: string;
   description?: string;
   season?: string;
@@ -320,30 +327,26 @@ export interface StandingGroup {
   table: StandingRow[];
 }
 
+export interface BracketMatchTeam {
+  id?: string | number;
+  name: string;
+  shortName?: string;
+  logo?: string;
+  score?: number | string;
+  winner?: boolean;
+  seed?: number;
+  /** Récord de la fase suiza en el momento del cruce (ej. "3-1"). */
+  record?: string;
+}
+
 export interface BracketMatch {
   id: string;
   name: string;
   stage?: string;
   status: 'FINISHED' | 'LIVE' | 'UPCOMING';
   scheduledTime?: string;
-  teamA: {
-    id?: string | number;
-    name: string;
-    shortName?: string;
-    logo?: string;
-    score?: number | string;
-    winner?: boolean;
-    seed?: number;
-  };
-  teamB: {
-    id?: string | number;
-    name: string;
-    shortName?: string;
-    logo?: string;
-    score?: number | string;
-    winner?: boolean;
-    seed?: number;
-  };
+  teamA: BracketMatchTeam;
+  teamB: BracketMatchTeam;
 }
 
 export interface BracketRound {
@@ -357,6 +360,31 @@ export interface TournamentBracket {
   upperRounds: BracketRound[];
   lowerRounds?: BracketRound[];
   grandFinal?: BracketMatch;
+}
+
+/** Naturaleza de cada fase del torneo (Play-In, Suiza, Grupos, Playoffs...). */
+export type TournamentStageFormat = 'LEAGUE' | 'GROUPS' | 'SWISS' | 'PLAY_IN' | 'KNOCKOUT';
+
+/** Ronda de una fase suiza: cada equipo juega una serie por ronda. */
+export interface SwissRound {
+  roundNumber: number;
+  roundName: string;
+  matches: BracketMatch[];
+}
+
+/**
+ * Fase interna de un torneo (Play-In, Fase Suiza, Playoffs...). Cada fase se
+ * pinta con su propia tabla y/o cuadro, sin mezclar formatos distintos.
+ */
+export interface TournamentStage {
+  id: string;
+  name: string;
+  format: TournamentStageFormat;
+  standings?: StandingGroup[];
+  bracket?: TournamentBracket;
+  /** Cruces ronda a ronda cuando la fase es suiza. */
+  swissRounds?: SwissRound[];
+  matches: Match[];
 }
 
 export interface TournamentParticipant {
@@ -387,6 +415,8 @@ export interface TournamentFullDetail {
   officialStreamUrl?: string;
   standings?: StandingGroup[];
   bracket?: TournamentBracket;
+  /** Fases internas del torneo (Play-In, Suiza, Playoffs...) con su formato real. */
+  stages?: TournamentStage[];
   participants: TournamentParticipant[];
   matches: Match[];
 }

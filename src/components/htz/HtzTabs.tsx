@@ -9,6 +9,7 @@ import {
   ViewStyle,
 } from 'react-native';
 import { htzTokens } from './tokens';
+import { MarqueeText } from '../MarqueeText';
 
 export interface TabItem {
   id: string;
@@ -53,16 +54,25 @@ export const HtzTabs: React.FC<HtzTabsProps> = ({
             {tab.icon}
           </View>
         )}
-        <Text
-          style={[
-            styles.label,
-            isActive && styles.activeLabel,
-            scrollable && styles.scrollableLabel,
-          ]}
-          numberOfLines={1}
-        >
-          {tab.label}
-        </Text>
+        {scrollable ? (
+          <Text
+            style={[
+              styles.label,
+              isActive && styles.activeLabel,
+              styles.scrollableLabel,
+            ]}
+            numberOfLines={1}
+          >
+            {tab.label}
+          </Text>
+        ) : (
+          <MarqueeText
+            text={tab.label}
+            textStyle={[styles.label, isActive && styles.activeLabel]}
+            containerStyle={styles.labelMarquee}
+            align="center"
+          />
+        )}
       </TouchableOpacity>
     );
   });
@@ -123,7 +133,10 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: htzTokens.colors.outline,
     textAlign: 'center',
+  },
+  labelMarquee: {
     flexShrink: 1,
+    minWidth: 0,
   },
   activeLabel: {
     color: htzTokens.colors.onPrimary,

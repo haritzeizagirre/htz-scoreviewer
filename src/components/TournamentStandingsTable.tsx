@@ -4,6 +4,7 @@ import { StandingGroup, StandingRow, SportCategory } from '../services/types';
 import { HtzCard, HtzChip } from './htz';
 import { htzTokens } from './htz/tokens';
 import { Trophy, Shield } from 'lucide-react-native';
+import { MarqueeText } from './MarqueeText';
 
 interface TournamentStandingsTableProps {
   standings: StandingGroup[];
@@ -154,9 +155,11 @@ export const TournamentStandingsTable: React.FC<TournamentStandingsTableProps> =
                         <Shield size={16} color={htzTokens.colors.outline} />
                       )}
                     </View>
-                    <Text style={styles.teamNameText} numberOfLines={1}>
-                      {row.teamName}
-                    </Text>
+                    <MarqueeText
+                      text={row.teamName}
+                      textStyle={styles.teamNameText}
+                      containerStyle={styles.teamNameMarquee}
+                    />
                   </View>
 
                   {/* Estadísticas */}
@@ -330,7 +333,10 @@ const styles = StyleSheet.create({
     color: htzTokens.colors.onSurface,
     fontSize: 12,
     fontWeight: '700',
+  },
+  teamNameMarquee: {
     flex: 1,
+    minWidth: 0,
   },
   cellStat: {
     width: 36,

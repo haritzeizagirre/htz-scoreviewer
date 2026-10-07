@@ -27,6 +27,7 @@ import {
 import { ScoreService, isGameCategoryEnabled } from '../services/scoreService';
 import { GameLogo } from './GameLogo';
 import { TournamentLogo } from './TournamentLogo';
+import { MarqueeText } from './MarqueeText';
 import { HtzCard, HtzChip, HtzButton } from './htz';
 import { htzTokens } from './htz/tokens';
 
@@ -132,18 +133,18 @@ export const TournamentHubView: React.FC<TournamentHubViewProps> = ({
             {/* Info */}
             <View style={styles.infoCol}>
               <View style={styles.titleRow}>
-                <Text style={styles.tournamentName} numberOfLines={1}>
-                  {item.name}
-                </Text>
+                <MarqueeText
+                  text={item.name}
+                  textStyle={styles.tournamentName}
+                  containerStyle={styles.tournamentNameWrap}
+                />
                 {item.shortName && item.shortName !== item.name && (
                   <Text style={styles.shortNameText}>({item.shortName})</Text>
                 )}
               </View>
 
               {item.description ? (
-                <Text style={styles.descText} numberOfLines={1}>
-                  {item.description}
-                </Text>
+                <MarqueeText text={item.description} textStyle={styles.descText} />
               ) : null}
 
               {/* Badges */}
@@ -466,7 +467,10 @@ const styles = StyleSheet.create({
     color: htzTokens.colors.onSurface,
     fontSize: 13,
     fontWeight: '800',
-    flexShrink: 1,
+  },
+  tournamentNameWrap: {
+    flex: 1,
+    minWidth: 0,
   },
   shortNameText: {
     color: htzTokens.colors.outline,

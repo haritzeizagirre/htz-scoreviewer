@@ -15,6 +15,7 @@ import {
 } from '../services/types';
 import { HtzCard, HtzChip, HtzButton } from './htz';
 import { htzTokens } from './htz/tokens';
+import { MarqueeText } from './MarqueeText';
 import { Trophy, LayoutGrid, ListFilter, Shield, ChevronRight, Flame } from 'lucide-react-native';
 
 interface TournamentBracketViewProps {
@@ -83,9 +84,11 @@ export const TournamentBracketView: React.FC<TournamentBracketViewProps> = ({
       >
         {/* Match Header / Stage */}
         <View style={styles.matchCardHeader}>
-          <Text style={styles.matchStageText} numberOfLines={1}>
-            {m.name || m.stage || 'Partido'}
-          </Text>
+          <MarqueeText
+            text={m.name || m.stage || 'Partido'}
+            textStyle={styles.matchStageText}
+            containerStyle={styles.matchStageMarquee}
+          />
           {isLive ? (
             <View style={styles.liveBadge}>
               <Flame size={10} color="#EF4444" />
@@ -106,9 +109,11 @@ export const TournamentBracketView: React.FC<TournamentBracketViewProps> = ({
                 <Shield size={12} color={htzTokens.colors.outline} />
               )}
             </View>
-            <Text style={[styles.teamNameText, aWon && styles.teamTextWinner]} numberOfLines={1}>
-              {m.teamA.name || 'TBD'}
-            </Text>
+            <MarqueeText
+              text={m.teamA.name || 'TBD'}
+              textStyle={[styles.teamNameText, aWon && styles.teamTextWinner]}
+              containerStyle={styles.teamNameMarquee}
+            />
           </View>
           <View style={[styles.scoreBadge, aWon && styles.scoreBadgeWinner]}>
             <Text style={[styles.scoreText, aWon && styles.scoreTextWinner]}>
@@ -127,9 +132,11 @@ export const TournamentBracketView: React.FC<TournamentBracketViewProps> = ({
                 <Shield size={12} color={htzTokens.colors.outline} />
               )}
             </View>
-            <Text style={[styles.teamNameText, bWon && styles.teamTextWinner]} numberOfLines={1}>
-              {m.teamB.name || 'TBD'}
-            </Text>
+            <MarqueeText
+              text={m.teamB.name || 'TBD'}
+              textStyle={[styles.teamNameText, bWon && styles.teamTextWinner]}
+              containerStyle={styles.teamNameMarquee}
+            />
           </View>
           <View style={[styles.scoreBadge, bWon && styles.scoreBadgeWinner]}>
             <Text style={[styles.scoreText, bWon && styles.scoreTextWinner]}>
@@ -203,9 +210,11 @@ export const TournamentBracketView: React.FC<TournamentBracketViewProps> = ({
             <View key={round.roundNumber + round.roundName} style={styles.roundColumn}>
               {/* Encabezado de la Ronda */}
               <View style={styles.roundColumnHeader}>
-                <Text style={styles.roundColumnTitle} numberOfLines={1}>
-                  {round.roundName}
-                </Text>
+                <MarqueeText
+                  text={round.roundName}
+                  textStyle={styles.roundColumnTitle}
+                  align="center"
+                />
                 <Text style={styles.roundMatchesCount}>
                   {round.matches.length} {round.matches.length === 1 ? 'partido' : 'partidos'}
                 </Text>
@@ -335,7 +344,11 @@ const styles = StyleSheet.create({
     color: htzTokens.colors.outline,
     fontSize: 10,
     fontWeight: '700',
+  },
+  matchStageMarquee: {
     flex: 1,
+    minWidth: 0,
+    marginRight: 6,
   },
   matchDateText: {
     color: htzTokens.colors.outline,
@@ -388,7 +401,10 @@ const styles = StyleSheet.create({
     color: htzTokens.colors.onSurfaceVariant,
     fontSize: 11,
     fontWeight: '600',
+  },
+  teamNameMarquee: {
     flex: 1,
+    minWidth: 0,
   },
   teamTextWinner: {
     color: htzTokens.colors.onSurface,

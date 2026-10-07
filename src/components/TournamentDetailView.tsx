@@ -20,6 +20,7 @@ import {
   Users,
   Flame,
   Clock,
+  GitBranch,
   Info,
   Tv,
   ExternalLink,
@@ -29,16 +30,19 @@ import {
 import {
   TournamentItem,
   TournamentFullDetail,
+  TournamentStage,
   Match,
   BracketMatch,
 } from '../services/types';
 import { TournamentService } from '../services/tournamentService';
 import { TournamentStandingsTable } from './TournamentStandingsTable';
 import { TournamentBracketView } from './TournamentBracketView';
+import { TournamentStageView } from './TournamentStageView';
 import { TournamentTeamsView } from './TournamentTeamsView';
 import { TournamentLogo } from './TournamentLogo';
 import { MatchCard } from './MatchCard';
 import { MatchDetailModal } from './MatchDetailModal';
+import { MarqueeText } from './MarqueeText';
 import { HtzCard, HtzTabs, HtzButton, TabItem } from './htz';
 import { htzTokens } from './htz/tokens';
 
@@ -51,6 +55,27 @@ interface TournamentDetailViewProps {
   footballToken?: string;
   favoriteTeams?: string[];
   onSelectMatchExternal?: (m: Match) => void;
+}
+
+/** Id de pestaña de una fase interna del torneo. */
+const stageTabId = (stage: TournamentStage) => `stage:${stage.id}`;
+
+/** Descripción del formato real de la competición para la ficha técnica. */
+function describeFormat(detail: TournamentFullDetail): string {
+  const stages = detail.stages || [];
+  if (stages.length > 1) {
+    return stages.map((s) => s.name).join(' → ');
+  }
+  switch (detail.format) {
+    case 'LEAGUE':
+      return 'Liga regular todos contra todos por puntos';
+    case 'PLAYOFFS':
+      return 'Fase eliminatoria de Playoffs con cuadro directo / doble eliminación';
+    case 'SWISS':
+      return 'Fase suiza por récords (3 victorias clasifican / 3 derrotas eliminan) + eliminatorias';
+    default:
+      return 'Fase de grupos / liga previa + Cuadro de eliminatorias';
+  }
 }
 
 export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
@@ -68,18 +93,39 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
   );
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [activeSubTab, setActiveSubTab] = useState<string>('standings');
+  // Pestaña elegida por el usuario: si deja de existir tras una recarga, se
+  // vuelve automáticamente a la pestaña por defecto (sin efectos de estado).
+  const [selectedSubTab, setSelectedSubTab] = useState<string | null>(null);
   const [selectedMatch, setSelectedMatch] = useState<Match | null>(null);
 
-  // Inicializar sub-pestaña por defecto según formato del torneo
-  useEffect(() => {
-    const isPlayoffs =
-      tournament.game !== 'FÚTBOL' ||
-      tournament.name.toLowerCase().includes('cup') ||
-      tournament.name.toLowerCase().includes('copa') ||
-      tournament.name.toLowerCase().includes('champions');
-    setActiveSubTab(isPlayoffs ? 'bracket' : 'standings');
-  }, [tournament.id]);
+  const stages = React.useMemo(() => detail.stages || [], [detail.stages]);
+  const hasStages = stages.length > 0;
+
+  // Dimensiones reales de los datos para decidir las pestañas
+  const hasStandings = Boolean(!hasStages && detail.standings && detail.standings.length > 0);
+  const hasBracket = Boolean(
+    !hasStages && detail.bracket && (detail.bracket.upperRounds?.length || detail.bracket.grandFinal)
+  );
+
+  // Pestaña que se muestra por defecto: la fase con partido en directo, si no la
+  // próxima con partidos, si no la última fase (normalmente los playoffs). Para
+  // torneos sin fases, el cuadro si existe y, si no, la clasificación.
+  const defaultTab = React.useMemo(() => {
+    if (stages.length > 0) {
+      const live = stages.find((s) => s.matches.some((m) => m.status === 'LIVE'));
+      const upcoming = stages.find((s) => s.matches.some((m) => m.status === 'UPCOMING'));
+      const target = live || upcoming || stages[stages.length - 1];
+      return stageTabId(target);
+    }
+    if (
+      detail.bracket &&
+      (detail.bracket.upperRounds?.length || detail.bracket.grandFinal)
+    ) {
+      return 'bracket';
+    }
+    if (detail.standings && detail.standings.length > 0) return 'standings';
+    return 'teams';
+  }, [stages, detail.standings, detail.bracket]);
 
   // Carga SWR: instantánea desde semilla/caché + revalidación en segundo plano
   const loadData = useCallback(
@@ -153,49 +199,64 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
     }
   };
 
-  // Definición de pestañas disponibles según los datos
-  const hasStandings = Boolean(detail.standings && detail.standings.length > 0);
-  const hasBracket = Boolean(
-    detail.bracket && (detail.bracket.upperRounds?.length || detail.bracket.grandFinal)
-  );
+  // Pestañas: una por fase real del torneo (Play-In, Suiza, Playoffs...) o,
+  // para torneos sin fases, Clasificación / Cuadro solo si existen de verdad.
+  const availableTabIds: string[] = [
+    ...(hasStages
+      ? stages.map(stageTabId)
+      : [
+          ...(hasStandings ? ['standings'] : []),
+          ...(hasBracket ? ['bracket'] : []),
+        ]),
+    'teams',
+    'matches',
+    'info',
+  ];
+
+  const activeSubTab =
+    selectedSubTab && availableTabIds.includes(selectedSubTab) ? selectedSubTab : defaultTab;
+
+  const tabIconColor = (tabId: string) =>
+    activeSubTab === tabId ? htzTokens.colors.onPrimary : htzTokens.colors.outline;
 
   const subTabs: TabItem[] = [
-    ...(hasStandings || !hasBracket
-      ? [
-          {
-            id: 'standings',
-            label: 'Clasificación',
-            icon: (
-              <Trophy
-                size={13}
-                color={
-                  activeSubTab === 'standings'
-                    ? htzTokens.colors.onPrimary
-                    : htzTokens.colors.outline
-                }
-              />
+    ...(hasStages
+      ? stages.map((stage) => {
+          const id = stageTabId(stage);
+          const isBracketStage =
+            stage.format === 'KNOCKOUT' || (stage.format === 'PLAY_IN' && !!stage.bracket);
+          return {
+            id,
+            label: stage.name,
+            icon: isBracketStage ? (
+              <Layers size={13} color={tabIconColor(id)} />
+            ) : stage.format === 'SWISS' ? (
+              <GitBranch size={13} color={tabIconColor(id)} />
+            ) : (
+              <Trophy size={13} color={tabIconColor(id)} />
             ),
-          },
-        ]
-      : []),
-    ...(hasBracket || !hasStandings
-      ? [
-          {
-            id: 'bracket',
-            label: 'Cuadro',
-            icon: (
-              <Layers
-                size={13}
-                color={
-                  activeSubTab === 'bracket'
-                    ? htzTokens.colors.onPrimary
-                    : htzTokens.colors.outline
-                }
-              />
-            ),
-          },
-        ]
-      : []),
+          };
+        })
+      : [
+          ...(hasStandings
+            ? [
+                {
+                  id: 'standings',
+                  label: 'Clasificación',
+                  icon: <Trophy size={13} color={tabIconColor('standings')} />,
+                },
+              ]
+            : []),
+          ...(hasBracket
+            ? [
+                {
+                  id: 'bracket',
+                  label: 'Cuadro',
+                  icon: <Layers size={13} color={tabIconColor('bracket')} />,
+                },
+              ]
+            : []),
+        ]),
     {
       id: 'teams',
       label: `Equipos (${detail.participants?.length || 0})`,
@@ -239,6 +300,10 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
       ),
     },
   ];
+
+  const activeStage = hasStages
+    ? stages.find((s) => stageTabId(s) === activeSubTab)
+    : undefined;
 
   const liveMatches = (detail.matches || []).filter((m) => m.status === 'LIVE');
   const byStartAsc = (a: Match, b: Match) =>
@@ -295,9 +360,9 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
             </View>
 
             <View style={styles.heroInfo}>
-              <Text style={styles.tournamentTitle}>{detail.name}</Text>
+              <MarqueeText text={detail.name} textStyle={styles.tournamentTitle} />
               {detail.description ? (
-                <Text style={styles.tournamentSubtitle}>{detail.description}</Text>
+                <MarqueeText text={detail.description} textStyle={styles.tournamentSubtitle} />
               ) : null}
 
               {/* Insignias de Juego, Tier, Región */}
@@ -368,20 +433,30 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
           <HtzTabs
             tabs={subTabs}
             activeTab={activeSubTab}
-            onChange={(tabId) => setActiveSubTab(tabId)}
+            onChange={(tabId) => setSelectedSubTab(tabId)}
+            scrollable={subTabs.length > 5}
           />
         </View>
 
-        {/* TAB 1: CLASIFICACIÓN */}
-        {activeSubTab === 'standings' && (
+        {/* FASE ACTIVA DEL TORNEO (Play-In, Suiza, Grupos, Playoffs...) */}
+        {activeStage && (
+          <TournamentStageView
+            stage={activeStage}
+            game={detail.game}
+            onSelectMatch={handleBracketMatchPress}
+          />
+        )}
+
+        {/* TAB 1: CLASIFICACIÓN (torneos sin fases internas) */}
+        {!hasStages && activeSubTab === 'standings' && (
           <TournamentStandingsTable
             standings={detail.standings || []}
             game={detail.game}
           />
         )}
 
-        {/* TAB 2: BRACKETS / CUADRO */}
-        {activeSubTab === 'bracket' && (
+        {/* TAB 2: BRACKETS / CUADRO (torneos sin fases internas) */}
+        {!hasStages && activeSubTab === 'bracket' && (
           <TournamentBracketView
             bracket={detail.bracket}
             onSelectMatch={handleBracketMatchPress}
@@ -485,13 +560,7 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
                 </View>
                 <View style={styles.infoContent}>
                   <Text style={styles.infoItemLabel}>Formato Oficial</Text>
-                  <Text style={styles.infoItemValue}>
-                    {detail.format === 'LEAGUE'
-                      ? 'Liga regular todos contra todos por puntos'
-                      : detail.format === 'PLAYOFFS'
-                      ? 'Fase eliminatoria de Playoffs con cuadro directo / doble eliminación'
-                      : 'Fase de grupos / liga previa + Cuadro de eliminatorias'}
-                  </Text>
+                  <Text style={styles.infoItemValue}>{describeFormat(detail)}</Text>
                 </View>
               </View>
 
