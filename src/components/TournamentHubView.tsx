@@ -13,6 +13,7 @@ import {
   Search,
   Star,
   Globe,
+  Calendar,
   ChevronRight,
   SlidersHorizontal,
   Flame,
@@ -246,6 +247,13 @@ export const TournamentHubView: React.FC<TournamentHubViewProps> = ({
                   <Globe size={9} color={htzTokens.colors.outline} />
                   <Text style={styles.regionBadgeText}>{item.region}</Text>
                 </View>
+
+                {item.season ? (
+                  <View style={styles.seasonBadge}>
+                    <Calendar size={9} color={htzTokens.colors.outline} />
+                    <Text style={styles.seasonBadgeText}>{item.season}</Text>
+                  </View>
+                ) : null}
               </View>
             </View>
 
@@ -591,6 +599,20 @@ const styles = StyleSheet.create({
     color: htzTokens.colors.outline,
     fontSize: 8,
     fontWeight: '600',
+  },
+  seasonBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: htzTokens.colors.surfaceContainerHigh,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 4,
+  },
+  seasonBadgeText: {
+    color: htzTokens.colors.outline,
+    fontSize: 8,
+    fontWeight: '700',
   },
   cardRightCol: {
     flexDirection: 'row',

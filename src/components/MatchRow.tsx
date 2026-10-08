@@ -3,6 +3,11 @@ import { View, Text, StyleSheet, Image, TouchableOpacity } from 'react-native';
 import { Star, ChevronRight } from 'lucide-react-native';
 import { Match, MatchTeam } from '../services/types';
 import { formatMatchSchedule } from '../services/dateUtils';
+import {
+  getCurrentMapNumber,
+  isLiveRoundScoreFinished,
+  toScoreNumber as toNumber,
+} from '../services/matchScoreUtils';
 import { GameLogo } from './GameLogo';
 import { MarqueeText } from './MarqueeText';
 import { htzTokens } from './htz';
@@ -14,38 +19,6 @@ interface MatchRowProps {
   isLast?: boolean;
   /** Muestra el logo del juego/deporte (útil cuando el grupo mezcla competiciones). */
   showGame?: boolean;
-}
-
-function toNumber(value: number | string): number {
-  const n = typeof value === 'number' ? value : parseInt(String(value), 10);
-  return isNaN(n) ? NaN : n;
-}
-
-/**
- * Número del mapa que se está jugando ahora mismo:
- * 1) el mapa marcado como "running" en el desglose,
- * 2) el mapNumber explícito si es válido (> 1),
- * 3) los mapas ya decididos en la serie + 1.
- */
-function getCurrentMapNumber(match: Match): number {
-  const breakdown = match.details?.gamesBreakdown;
-  const running = breakdown?.find((g) => g.status === 'running');
-  if (running && running.position > 0) return running.position;
-
-  const explicit = match.liveRoundScore?.mapNumber;
-  let mapNumber = explicit && explicit > 1 ? explicit : 0;
-
-  if (mapNumber === 0) {
-    const numA = toNumber(match.teamA.score);
-    const numB = toNumber(match.teamB.score);
-    const decided = (isNaN(numA) ? 0 : numA) + (isNaN(numB) ? 0 : numB);
-    mapNumber = decided + 1;
-  }
-
-  const bestOf = match.details?.bestOf;
-  if (bestOf && bestOf > 0) mapNumber = Math.min(mapNumber, bestOf);
-
-  return Math.max(1, mapNumber);
 }
 
 /** Etiqueta compacta del momento de juego para partidos en directo. */
@@ -125,7 +98,8 @@ export const MatchRow: React.FC<MatchRowProps> = ({
   const hasTacticalRoundScores =
     isLive &&
     (match.game === 'VALORANT' || match.game === 'CS2' || match.game === 'R6') &&
-    match.liveRoundScore !== undefined;
+    match.liveRoundScore !== undefined &&
+    !isLiveRoundScoreFinished(match);
   const liveRoundScoreA = hasTacticalRoundScores ? match.liveRoundScore!.scoreA : undefined;
   const liveRoundScoreB = hasTacticalRoundScores ? match.liveRoundScore!.scoreB : undefined;
 

@@ -55,6 +55,12 @@ interface TournamentDetailViewProps {
   footballToken?: string;
   favoriteTeams?: string[];
   onSelectMatchExternal?: (m: Match) => void;
+  /**
+   * Partidos ya cargados por el feed principal (favoritos, directos, próximos).
+   * Se fusionan con los del torneo para que un partido que aparece en favoritos
+   * también aparezca en la pestaña de partidos de su torneo.
+   */
+  feedMatches?: Match[];
 }
 
 /** Id de pestaña de una fase interna del torneo. */
@@ -87,6 +93,7 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
   footballToken,
   favoriteTeams = [],
   onSelectMatchExternal,
+  feedMatches = [],
 }) => {
   const [detail, setDetail] = useState<TournamentFullDetail>(() =>
     TournamentService.getMasterSeed(tournament)
@@ -97,6 +104,59 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
   // vuelve automáticamente a la pestaña por defecto (sin efectos de estado).
   const [selectedSubTab, setSelectedSubTab] = useState<string | null>(null);
   const [selectedMatch, setSelectedMatch] = useState<Match | null>(null);
+
+  // Partidos del torneo fusionados con los del feed principal (favoritos, directos,
+  // próximos): si un partido aparece en la pestaña Partidos porque es tu favorito,
+  // también aparece aquí, en su torneo. El feed manda cuando el partido ya existe
+  // (trae marcador en directo y favoritos actualizados).
+  const displayedMatches = React.useMemo(() => {
+    const base = detail.matches || [];
+    const extra = feedMatches || [];
+    if (extra.length === 0) return base;
+
+    const norm = (v?: string) => (v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const teamsMatch = (a: Match, b: Match) => {
+      const aA = norm(a.teamA.name);
+      const aB = norm(a.teamB.name);
+      const bA = norm(b.teamA.name);
+      const bB = norm(b.teamB.name);
+      return (aA === bA && aB === bB) || (aA === bB && aB === bA);
+    };
+    const sameDay = (a: Match, b: Match) => {
+      const da = new Date(a.startTimeIso);
+      const db = new Date(b.startTimeIso);
+      if (isNaN(da.getTime()) || isNaN(db.getTime())) return false;
+      return da.toDateString() === db.toDateString();
+    };
+    const belongsToTournament = (m: Match) => {
+      if (m.game !== detail.game) return false;
+      if (m.masterTournamentId) {
+        return m.masterTournamentId === tournament.id || m.masterTournamentId === detail.id;
+      }
+      // Torneos dinámicos sin ID maestro: coincidencia por nombre de competición.
+      const league = norm(m.league);
+      const tName = norm(tournament.name);
+      const tShort = norm(tournament.shortName);
+      return (
+        (tName.length >= 5 && league.includes(tName)) ||
+        (tShort.length >= 5 && league.includes(tShort))
+      );
+    };
+
+    const result = [...base];
+    for (const fm of extra) {
+      if (!belongsToTournament(fm)) continue;
+      const idx = result.findIndex(
+        (m) => teamsMatch(m, fm) && (sameDay(m, fm) || (m.status === 'LIVE' && fm.status === 'LIVE'))
+      );
+      if (idx >= 0) {
+        result[idx] = fm;
+      } else {
+        result.push(fm);
+      }
+    }
+    return result;
+  }, [detail.matches, detail.id, detail.game, tournament.id, tournament.name, tournament.shortName, feedMatches]);
 
   const stages = React.useMemo(() => detail.stages || [], [detail.stages]);
   const hasStages = stages.length > 0;
@@ -159,7 +219,7 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
   // Manejo de clic en partido desde el bracket
   const handleBracketMatchPress = (bm: BracketMatch) => {
     // Intentar buscar partido completo en la lista de partidos del torneo
-    const fullMatch = detail.matches?.find(
+    const fullMatch = displayedMatches.find(
       (m) =>
         m.id === bm.id ||
         (m.teamA.name === bm.teamA.name && m.teamB.name === bm.teamB.name)
@@ -273,7 +333,7 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
     },
     {
       id: 'matches',
-      label: `Partidos (${detail.matches?.length || 0})`,
+      label: `Partidos (${displayedMatches.length})`,
       icon: (
         <Calendar
           size={13}
@@ -305,13 +365,13 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
     ? stages.find((s) => stageTabId(s) === activeSubTab)
     : undefined;
 
-  const liveMatches = (detail.matches || []).filter((m) => m.status === 'LIVE');
+  const liveMatches = displayedMatches.filter((m) => m.status === 'LIVE');
   const byStartAsc = (a: Match, b: Match) =>
     new Date(a.startTimeIso).getTime() - new Date(b.startTimeIso).getTime();
   const byStartDesc = (a: Match, b: Match) =>
     new Date(b.startTimeIso).getTime() - new Date(a.startTimeIso).getTime();
-  const upcomingMatches = (detail.matches || []).filter((m) => m.status === 'UPCOMING').sort(byStartAsc);
-  const finishedMatches = (detail.matches || []).filter((m) => m.status === 'FINISHED').sort(byStartDesc);
+  const upcomingMatches = displayedMatches.filter((m) => m.status === 'UPCOMING').sort(byStartAsc);
+  const finishedMatches = displayedMatches.filter((m) => m.status === 'FINISHED').sort(byStartDesc);
 
   // Nº de equipos del torneo: el mayor dato disponible entre participantes con ficha
   // y la clasificación real. Evita que la cabecera contradiga a la tabla (p. ej.
@@ -504,7 +564,7 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
         {/* TAB 4: PARTIDOS Y CALENDARIO */}
         {activeSubTab === 'matches' && (
           <View style={styles.matchesTabContainer}>
-            {detail.matches && detail.matches.length > 0 ? (
+            {displayedMatches.length > 0 ? (
               <View style={{ gap: 12 }}>
                 {liveMatches.length > 0 && (
                   <View>

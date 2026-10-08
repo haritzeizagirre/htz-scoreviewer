@@ -28,6 +28,7 @@ import {
 } from 'lucide-react-native';
 import { Match, SportCategory } from '../services/types';
 import { formatMatchSchedule } from '../services/dateUtils';
+import { getCurrentMapNumber, isLiveRoundScoreFinished } from '../services/matchScoreUtils';
 import { getDefaultStreams } from '../services/scoreService';
 import { VlrScoreboardView } from './VlrScoreboardView';
 import { R6ScoreboardView } from './R6ScoreboardView';
@@ -258,9 +259,13 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
               <View style={styles.minLiveBadge}>
                 <View style={styles.minLiveDot} />
                 <Text style={styles.minLiveBadgeText}>
-                  {match.liveRoundScore?.mapName
-                    ? `${match.liveRoundScore.mapName}: ${match.liveRoundScore.scoreA}-${match.liveRoundScore.scoreB}`
-                    : match.liveRoundScore?.roundOrTime || 'EN DIRECTO'}
+                  {match.liveRoundScore && !isLiveRoundScoreFinished(match)
+                    ? match.liveRoundScore.mapName
+                      ? `${match.liveRoundScore.mapName}: ${match.liveRoundScore.scoreA}-${match.liveRoundScore.scoreB}`
+                      : match.liveRoundScore.roundOrTime || 'EN DIRECTO'
+                    : match.game === 'VALORANT' || match.game === 'CS2' || match.game === 'R6'
+                    ? `EN DIRECTO • Mapa ${getCurrentMapNumber(match)}`
+                    : 'EN DIRECTO'}
                 </Text>
               </View>
             ) : match.status === 'FINISHED' ? (

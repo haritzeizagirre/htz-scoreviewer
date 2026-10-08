@@ -1097,8 +1097,10 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     (Object.keys(matchesByStatus) as MatchStatus[]).forEach((st) => {
       const pageMatches = matchesByStatus[st];
       const favorite = pageMatches.filter((m) => m.teamA.isFav || m.teamB.isFav);
-      const other = pageMatches.filter((m) => !(m.teamA.isFav || m.teamB.isFav));
-      result[st] = { favorite, groups: groupMatchesByLeague(other) };
+      // Los partidos de equipos favoritos se muestran también dentro del grupo de
+      // su torneo (además de en la sección destacada), para que un partido que
+      // aparece en favoritos también aparezca en su competición.
+      result[st] = { favorite, groups: groupMatchesByLeague(pageMatches) };
     });
     return result;
   }, [matchesByStatus]);
@@ -1906,6 +1908,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
               footballToken={watchConfig.footballToken}
               favoriteTeams={watchConfig.favoriteTeams}
               onSelectMatchExternal={handleSelectMatch}
+              feedMatches={matches}
             />
           </View>
         )}

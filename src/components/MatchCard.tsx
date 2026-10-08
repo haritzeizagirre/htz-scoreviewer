@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, Image, TouchableOpacity } from 'react-native';
 import { Star, Clock, Flame, CheckCircle2, Globe } from 'lucide-react-native';
 import { Match, MatchRegion, SportCategory } from '../services/types';
 import { formatMatchSchedule } from '../services/dateUtils';
+import { getCurrentMapNumber, isLiveRoundScoreFinished } from '../services/matchScoreUtils';
 import { HtzCard, HtzBadge, htzTokens } from './htz';
 import { GameLogo } from './GameLogo';
 import { MarqueeText } from './MarqueeText';
@@ -70,19 +71,23 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onPress, onSelectTo
       .trim();
   }
 
+  // El marcador de rondas de un mapa ya terminado no se muestra (el tanteo de
+  // mapas de la serie ya lo refleja): evita el "1-0" junto a "13-8".
+  const roundScoreFinished = isLiveRoundScoreFinished(match);
+
   // Formato limpio del estado del partido en directo
   const getLiveScheduleText = () => {
     if (match.status !== 'LIVE') return schedule.fullText;
     if (match.game === 'FÚTBOL') {
       return match.liveRoundScore?.roundOrTime || 'En directo';
     }
-    if (match.game === 'LOL') {
-      const num = match.liveRoundScore?.mapNumber || 1;
-      return `Juego ${num}`;
+    if (match.game === 'LOL' || match.game === 'DOTA2') {
+      const num = roundScoreFinished ? getCurrentMapNumber(match) : match.liveRoundScore?.mapNumber || 1;
+      return match.game === 'LOL' ? `Juego ${num}` : `Partida ${num}`;
     }
-    if (match.game === 'DOTA2') {
-      const num = match.liveRoundScore?.mapNumber || 1;
-      return `Partida ${num}`;
+    if (roundScoreFinished) {
+      // Entre mapas: se indica el siguiente mapa por comenzar, sin tanteo de rondas.
+      return `Mapa ${getCurrentMapNumber(match)}`;
     }
     if (match.liveRoundScore?.mapName) {
       const cleanMap = match.liveRoundScore.mapName
@@ -101,6 +106,7 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onPress, onSelectTo
   const hasTacticalRoundScores =
     (match.game === 'VALORANT' || match.game === 'CS2' || match.game === 'R6') &&
     match.liveRoundScore !== undefined &&
+    !roundScoreFinished &&
     match.status === 'LIVE';
 
   return (

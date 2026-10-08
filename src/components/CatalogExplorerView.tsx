@@ -16,6 +16,7 @@ import {
   Trophy,
   Shield,
   Globe,
+  Calendar,
   SlidersHorizontal,
   ChevronRight,
   MapPin,
@@ -487,6 +488,14 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
                           <Text style={styles.itemRegionText}>{tournament.region}</Text>
                         </View>
 
+                        {/* Temporada (año o curso, p. ej. 2026 o 2025/2026) */}
+                        {tournament.season ? (
+                          <View style={styles.itemSeasonBadge}>
+                            <Calendar size={10} color={htzTokens.colors.outline} />
+                            <Text style={styles.itemSeasonText}>{tournament.season}</Text>
+                          </View>
+                        ) : null}
+
                         {/* Deporte */}
                         <View style={styles.itemGameBadge}>
                           <Text style={styles.itemGameText}>{tournament.game}</Text>
@@ -797,6 +806,22 @@ const styles = StyleSheet.create({
     borderColor: htzTokens.colors.outline,
   },
   itemRegionText: {
+    color: htzTokens.colors.onSurfaceVariant,
+    fontSize: 9,
+    fontWeight: '700',
+  },
+  itemSeasonBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: htzTokens.colors.surfaceVariant,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: htzTokens.colors.outline,
+  },
+  itemSeasonText: {
     color: htzTokens.colors.onSurfaceVariant,
     fontSize: 9,
     fontWeight: '700',

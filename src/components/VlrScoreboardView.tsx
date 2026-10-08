@@ -47,6 +47,28 @@ export const VlrScoreboardView: React.FC<VlrScoreboardViewProps> = ({
   const [loading, setLoading] = useState(true);
   const [selectedMapIndex, setSelectedMapIndex] = useState(0);
 
+  // Agentes usados por cada jugador en el conjunto de la serie: en la pestaña
+  // "Todos" VLR solo asocia un agente por jugador aunque haya jugado varios
+  // distintos en mapas diferentes. Este índice reúne todos los agentes jugados.
+  const agentsByPlayer = React.useMemo(() => {
+    const map = new Map<string, { name: string; iconUrl?: string }[]>();
+    if (!data) return map;
+    for (const m of data.maps) {
+      if (m.mapNumber === 0) continue;
+      for (const p of [...m.teamAStats, ...m.teamBStats]) {
+        const agent = (p.agentName || '').trim();
+        if (!agent || agent === '-') continue;
+        const key = p.name.toLowerCase().trim();
+        const list = map.get(key) || [];
+        if (!list.some((a) => a.name.toLowerCase() === agent.toLowerCase())) {
+          list.push({ name: agent, iconUrl: p.agentIconUrl });
+        }
+        map.set(key, list);
+      }
+    }
+    return map;
+  }, [data]);
+
   useEffect(() => {
     let mounted = true;
     setLoading(true);
@@ -222,7 +244,10 @@ export const VlrScoreboardView: React.FC<VlrScoreboardViewProps> = ({
         <View style={styles.teamHeaderRow}>
           <Text style={styles.teamTitle}>{teamAName}</Text>
         </View>
-        {renderPlayerTable(currentMap.teamAStats)}
+        {renderPlayerTable(
+          currentMap.teamAStats,
+          currentMap.mapNumber === 0 ? agentsByPlayer : undefined
+        )}
       </View>
 
       <View style={{ height: 16 }} />
@@ -232,13 +257,19 @@ export const VlrScoreboardView: React.FC<VlrScoreboardViewProps> = ({
         <View style={styles.teamHeaderRow}>
           <Text style={styles.teamTitle}>{teamBName}</Text>
         </View>
-        {renderPlayerTable(currentMap.teamBStats)}
+        {renderPlayerTable(
+          currentMap.teamBStats,
+          currentMap.mapNumber === 0 ? agentsByPlayer : undefined
+        )}
       </View>
     </View>
   );
 };
 
-function renderPlayerTable(players: VlrPlayerStats[]) {
+function renderPlayerTable(
+  players: VlrPlayerStats[],
+  agentsByPlayer?: Map<string, { name: string; iconUrl?: string }[]>
+) {
   if (!players || players.length === 0) {
     return (
       <View style={styles.noDataRow}>
@@ -294,17 +325,49 @@ function renderPlayerTable(players: VlrPlayerStats[]) {
                 </View>
               </View>
 
-              {/* Agent */}
+              {/* Agent(s): en "Todos" se muestran todos los agentes jugados en la serie */}
               <View style={[styles.colAgent, styles.agentCell]}>
-                {p.agentIconUrl ? (
-                  <Image source={{ uri: p.agentIconUrl }} style={styles.agentImage} />
-                ) : (
-                  <View style={styles.agentPlaceholder}>
-                    <Text style={styles.agentPlaceholderText}>
-                      {p.agentName?.slice(0, 3).toUpperCase() || '-'}
-                    </Text>
-                  </View>
-                )}
+                {(() => {
+                  const agents = agentsByPlayer?.get(p.name.toLowerCase().trim()) || [];
+                  if (agents.length > 1) {
+                    return (
+                      <View style={styles.agentStack}>
+                        {agents.slice(0, 3).map((agent, agentIdx) =>
+                          agent.iconUrl ? (
+                            <Image
+                              key={agentIdx}
+                              source={{ uri: agent.iconUrl }}
+                              style={styles.agentImageSmall}
+                            />
+                          ) : (
+                            <View key={agentIdx} style={styles.agentPlaceholderSmall}>
+                              <Text style={styles.agentPlaceholderSmallText}>
+                                {agent.name.slice(0, 2).toUpperCase()}
+                              </Text>
+                            </View>
+                          )
+                        )}
+                        {agents.length > 3 && (
+                          <Text style={styles.agentMoreText}>+{agents.length - 3}</Text>
+                        )}
+                      </View>
+                    );
+                  }
+                  // Un solo agente: se prioriza el recogido por mapa (por si el
+                  // cómputo global de VLR no lo trae) y si no el de la propia fila.
+                  const primary = agents[0];
+                  const iconUrl = primary?.iconUrl || p.agentIconUrl;
+                  const label = primary?.name || p.agentName;
+                  return iconUrl ? (
+                    <Image source={{ uri: iconUrl }} style={styles.agentImage} />
+                  ) : (
+                    <View style={styles.agentPlaceholder}>
+                      <Text style={styles.agentPlaceholderText}>
+                        {label?.slice(0, 3).toUpperCase() || '-'}
+                      </Text>
+                    </View>
+                  );
+                })()}
               </View>
 
               {/* Rating */}
@@ -573,6 +636,36 @@ const styles = StyleSheet.create({
     width: 22,
     height: 22,
     borderRadius: 4,
+  },
+  agentStack: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+  },
+  agentImageSmall: {
+    width: 14,
+    height: 14,
+    borderRadius: 3,
+  },
+  agentPlaceholderSmall: {
+    width: 14,
+    height: 14,
+    borderRadius: 3,
+    backgroundColor: '#333',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  agentPlaceholderSmallText: {
+    color: '#FFF',
+    fontSize: 6,
+    fontWeight: '700',
+  },
+  agentMoreText: {
+    color: htzTokens.colors.outline,
+    fontSize: 8,
+    fontWeight: '700',
+    marginLeft: 1,
   },
   agentPlaceholder: {
     width: 22,

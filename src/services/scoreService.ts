@@ -349,7 +349,19 @@ export function toggleTournamentFavorite(
         const f = fav.toLowerCase().trim();
         if (!f) return false;
         // Si es un torneo dinámico/online, retirar únicamente su ID exacto
+        // (y el torneo maestro equivalente si la liga está en el catálogo).
         if (isDynamic) {
+          const master = findMasterTournamentForLeague(
+            tournament.game,
+            tournament.leagueId,
+            tournament.name,
+            tournament.slug
+          );
+          if (master) {
+            const mId = master.id.toLowerCase();
+            const mName = master.name.toLowerCase();
+            if (f === mId || f === mName) return false;
+          }
           return f !== tId;
         }
         // Si es local maestro, eliminar su ID y sus nombres/alias exactos
@@ -362,6 +374,24 @@ export function toggleTournamentFavorite(
       });
     } else {
       if (isDynamic) {
+        // Si la liga online equivale a un torneo del catálogo, el favorito se
+        // guarda con el ID maestro para que case con los partidos del feed.
+        const master = findMasterTournamentForLeague(
+          tournament.game,
+          tournament.leagueId,
+          tournament.name,
+          tournament.slug
+        );
+        if (master) {
+          const result = [...favorites];
+          if (!result.some((f) => f.toLowerCase().trim() === master.id.toLowerCase())) {
+            result.push(master.id);
+          }
+          if (!result.some((f) => f.toLowerCase().trim() === master.name.toLowerCase())) {
+            result.push(master.name);
+          }
+          return result;
+        }
         return [...favorites, tournament.id];
       }
       // Para local maestro, añadir ID y Nombre (si no está ya) para sincronización con reloj y feed
@@ -853,7 +883,35 @@ export function resolveMasterTournamentId(
       case 'R6': {
         if (text.includes('invitational')) return 'r6-six-invitational';
         if (text.includes('major')) return 'r6-six-major';
-        if (text.includes('league') || text.includes('pro league')) return 'r6-europe-league';
+        // Ligas regionales Tier 1 del circuito BLAST R6. La región decide el torneo
+        // maestro correcto: sin esto, cualquier liga abría la de Europe MENA.
+        if (text.includes('china') || text.includes(' cn ') || text.includes('cn league')) {
+          return 'r6-china-league';
+        }
+        if (
+          text.includes('asia') ||
+          text.includes('apac') ||
+          text.includes('pacific') ||
+          text.includes('japan') ||
+          text.includes('korea') ||
+          text.includes('oceania')
+        ) {
+          return 'r6-apac-league';
+        }
+        if (text.includes('north america') || text.includes('na league')) {
+          return 'r6-na-league';
+        }
+        if (
+          text.includes('south america') ||
+          text.includes('brazil') ||
+          text.includes('brasil') ||
+          text.includes('latam')
+        ) {
+          return 'r6-south-america-league';
+        }
+        if (text.includes('europe') || text.includes('mena') || text.includes('emea')) {
+          return 'r6-europe-league';
+        }
         return null;
       }
       case 'DOTA2': {
@@ -1026,6 +1084,8 @@ export function resolveMatchRegion(
     text.includes('pacific') ||
     text.includes('china') ||
     text.includes(' cn ') ||
+    text.includes('cn league') ||
+    text.includes('oceania') ||
     text.includes('korea') ||
     text.includes('lck') ||
     text.includes('lpl') ||
@@ -1052,6 +1112,81 @@ export function resolveMatchRegion(
   if (reg === 'ASIA') return 'ASIA';
 
   return 'GLOBAL';
+}
+
+/**
+ * Temporada visible de un torneo para las tarjetas del catálogo/explorador.
+ * - Si el nombre ya incluye un año ("Worlds 2026", "Demacia Cup 2026"), se usa ese.
+ * - En fútbol se calcula la temporada europea en curso (p. ej. "2026/2027").
+ * - En esports se usa el año natural en curso.
+ */
+export function inferTournamentSeason(
+  game: SportCategory | string,
+  name?: string,
+  explicitSeason?: string
+): string {
+  if (explicitSeason && explicitSeason.trim()) return explicitSeason.trim();
+
+  const yearInName = (name || '').match(/\b(20\d{2})\b/);
+  if (yearInName) return yearInName[1];
+
+  const now = new Date();
+  if (game === 'FÚTBOL') {
+    const y = now.getFullYear();
+    // Temporada europea: agosto-mayo. De julio en adelante empieza la del año en curso.
+    const start = now.getMonth() >= 6 ? y : y - 1;
+    return `${start}/${start + 1}`;
+  }
+  return String(now.getFullYear());
+}
+
+/** Clave normalizada (minúsculas, sin signos) para comparar nombres de torneos. */
+function normalizeTournamentKey(value?: string): string {
+  return (value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * Busca el torneo maestro del catálogo al que corresponde una liga online de
+ * PandaScore (por leagueId, nombre o slug). Se usa para que favoritar una liga
+ * desde la búsqueda online guarde el ID maestro y no un ID `panda-` que nunca
+ * casaría con los partidos ni con las estrellas del catálogo.
+ */
+export function findMasterTournamentForLeague(
+  game: SportCategory,
+  leagueId?: number | string,
+  name?: string,
+  slug?: string
+): TournamentItem | null {
+  const idNum = leagueId !== undefined && leagueId !== null ? String(leagueId) : '';
+
+  for (const mt of MASTER_TOURNAMENTS) {
+    if (mt.game !== game) continue;
+    if (idNum && mt.leagueId !== undefined && String(mt.leagueId) === idNum) return mt;
+  }
+
+  const n = normalizeTournamentKey(name);
+  const s = normalizeTournamentKey(slug);
+  if (!n && !s) return null;
+
+  let best: { mt: TournamentItem; len: number } | null = null;
+  for (const mt of MASTER_TOURNAMENTS) {
+    if (mt.game !== game) continue;
+    const candidates = [
+      normalizeTournamentKey(mt.name),
+      normalizeTournamentKey(mt.shortName),
+      normalizeTournamentKey(mt.slug),
+    ].filter((v) => v.length >= 4);
+    for (const c of candidates) {
+      const equal = n === c || s === c;
+      // Nombre de liga con sufijo de edición/año: "Demacia Cup 2026" -> "Demacia Cup".
+      const yearSuffixed =
+        n.length > c.length && n.startsWith(c) && /^(20\d{2}|\d{2})/.test(n.slice(c.length));
+      if ((equal || yearSuffixed) && (!best || c.length > best.len)) {
+        best = { mt, len: c.length };
+      }
+    }
+  }
+  return best?.mt ?? null;
 }
 
 const ROSTER_CACHE = new Map<string | number, PlayerInfo[]>();
@@ -1843,6 +1978,46 @@ export const MASTER_TOURNAMENTS: TournamentItem[] = [
     leagueId: 5408,
     externalId: '10912',
     description: 'Liga profesional de Europa y Oriente Medio de Rainbow Six',
+  },
+  {
+    id: 'r6-na-league',
+    name: 'North America League',
+    shortName: 'NAL',
+    slug: 'r6-siege-north-america-league',
+    game: 'R6',
+    tier: 'A',
+    region: 'AMERICAS',
+    description: 'Liga profesional de Norteamérica de Rainbow Six',
+  },
+  {
+    id: 'r6-south-america-league',
+    name: 'South America League',
+    shortName: 'SAL',
+    slug: 'r6-siege-south-america-league',
+    game: 'R6',
+    tier: 'A',
+    region: 'AMERICAS',
+    description: 'Liga profesional de Sudamérica de Rainbow Six',
+  },
+  {
+    id: 'r6-apac-league',
+    name: 'Asia Pacific League',
+    shortName: 'APAC',
+    slug: 'r6-siege-asia-pacific-league',
+    game: 'R6',
+    tier: 'A',
+    region: 'ASIA',
+    description: 'Liga profesional de Asia-Pacífico de Rainbow Six',
+  },
+  {
+    id: 'r6-china-league',
+    name: 'CN League',
+    shortName: 'CN',
+    slug: 'r6-siege-cn-league',
+    game: 'R6',
+    tier: 'A',
+    region: 'ASIA',
+    description: 'Liga profesional de China de Rainbow Six',
   },
 
   // DOTA 2
@@ -2887,16 +3062,18 @@ export const ScoreService = {
         if (vlrMatch) {
           matchedVlrHrefs.add(vlrMatch.id);
           pm.status = 'LIVE';
-          if (vlrMatch.liveRoundScore) {
-            pm.liveRoundScore = vlrMatch.liveRoundScore;
-            pm.timeInfo = 'EN DIRECTO';
-            if (pm.details) {
-              pm.details.roundOrMap = undefined;
-              if (vlrMatch.details?.gamesBreakdown && vlrMatch.details.gamesBreakdown.length > 0) {
-                pm.details.gamesBreakdown = vlrMatch.details.gamesBreakdown;
-              }
+          pm.timeInfo = 'EN DIRECTO';
+          // VLR es la fuente autoritativa del estado en directo: su desglose de
+          // mapas sustituye al de PandaScore aunque ahora no haya un mapa en curso.
+          if (pm.details) {
+            pm.details.roundOrMap = undefined;
+            if (vlrMatch.details?.gamesBreakdown && vlrMatch.details.gamesBreakdown.length > 0) {
+              pm.details.gamesBreakdown = vlrMatch.details.gamesBreakdown;
             }
           }
+          // Entre mapas (el anterior terminó y el siguiente no empezó) no se arrastra
+          // el tanteo de rondas del mapa terminado (evita "1-0" junto a "13-8").
+          pm.liveRoundScore = vlrMatch.liveRoundScore;
           if (typeof vlrMatch.teamA.score === 'number' && typeof vlrMatch.teamB.score === 'number') {
             pm.teamA.score = Math.max(typeof pm.teamA.score === 'number' ? pm.teamA.score : 0, vlrMatch.teamA.score);
             pm.teamB.score = Math.max(typeof pm.teamB.score === 'number' ? pm.teamB.score : 0, vlrMatch.teamB.score);
@@ -3716,16 +3893,24 @@ export const ScoreService = {
           seriesA = Math.max(seriesA, finishedA);
           seriesB = Math.max(seriesB, finishedB);
 
-          if (!currentLiveMap && gamesBreakdown.length > 0) {
-            const first = gamesBreakdown[0];
-            const parsedA = typeof first.scoreA === 'number' ? first.scoreA : parseInt(String(first.scoreA), 10);
-            const parsedB = typeof first.scoreB === 'number' ? first.scoreB : parseInt(String(first.scoreB), 10);
-            currentLiveMap = {
-              mapName: first.mapName || 'Mapa 1',
-              scoreA: isNaN(parsedA) ? 0 : parsedA,
-              scoreB: isNaN(parsedB) ? 0 : parsedB,
-              mapNumber: 1,
-            };
+          // Si no hay ningún mapa en curso (p. ej. acaba de terminar un mapa y el
+          // siguiente aún no ha empezado) no se inventa un marcador de rondas: antes
+          // se reutilizaba el del último mapa terminado (13-8) y se confundía con el
+          // tanteo de mapas de la serie (1-0).
+          if (!currentLiveMap) {
+            const runningNow = gamesBreakdown.find((g) => g.status === 'running');
+            if (runningNow) {
+              const parsedA =
+                typeof runningNow.scoreA === 'number' ? runningNow.scoreA : parseInt(String(runningNow.scoreA), 10);
+              const parsedB =
+                typeof runningNow.scoreB === 'number' ? runningNow.scoreB : parseInt(String(runningNow.scoreB), 10);
+              currentLiveMap = {
+                mapName: runningNow.mapName || 'Mapa 1',
+                scoreA: isNaN(parsedA) ? 0 : parsedA,
+                scoreB: isNaN(parsedB) ? 0 : parsedB,
+                mapNumber: runningNow.position || 1,
+              };
+            }
           }
 
           const liveScoreStr = currentLiveMap
@@ -3954,17 +4139,18 @@ export const ScoreService = {
 
     return MASTER_TOURNAMENTS.map((t) => ({
       ...t,
+      season: inferTournamentSeason(t.game, t.name, t.season),
       isFav: isTournamentItemFavorite(t, favs),
     })).filter((t) => {
       if (game !== 'TODOS' && t.game !== game) return false;
       if (tier !== 'TODOS' && t.tier !== tier) return false;
       if (region !== 'TODOS' && t.region !== region) return false;
       if (q) {
-        const matchesName = t.name.toLowerCase().includes(q);
-        const matchesShort = (t.shortName || '').toLowerCase().includes(q);
-        const matchesDesc = (t.description || '').toLowerCase().includes(q);
-        const matchesCountry = (t.country || '').toLowerCase().includes(q);
-        if (!matchesName && !matchesShort && !matchesDesc && !matchesCountry) return false;
+        // Coincidencia por palabras: "demacia cup 2026" encuentra "Demacia Cup"
+        // aunque el nombre del torneo no incluya el año (la temporada sí lo tiene).
+        const haystack = `${t.name} ${t.shortName || ''} ${t.description || ''} ${t.country || ''} ${t.slug || ''} ${t.season || ''}`.toLowerCase();
+        const tokens = q.split(/\s+/).filter(Boolean);
+        if (!tokens.every((tok) => haystack.includes(tok))) return false;
       }
       return true;
     });
@@ -4049,18 +4235,25 @@ export const ScoreService = {
                 }
               }
 
+              // Si la liga online es en realidad un torneo del catálogo maestro
+              // (p. ej. "Demacia Cup"), se devuelve con el ID maestro: así la estrella,
+              // los favoritos y los partidos del feed casan entre sí.
+              const master = findMasterTournamentForLeague(category, item.id, item.name, item.slug);
               results.push({
-                id: `panda-league-${item.id}`,
-                name: item.name,
+                id: master ? master.id : `panda-league-${item.id}`,
+                name: master ? master.name : item.name,
                 shortName,
                 slug: item.slug,
-                logo: item.image_url || undefined,
+                logo: item.image_url || master?.logo,
                 game: category,
                 tier,
                 region,
                 leagueId: item.id,
                 externalId: item.id,
-                description: item.videogame?.name ? `Competición de ${item.videogame.name}` : undefined,
+                season: inferTournamentSeason(category, item.name),
+                description:
+                  master?.description ||
+                  (item.videogame?.name ? `Competición de ${item.videogame.name}` : undefined),
               });
             }
           }
@@ -4108,6 +4301,16 @@ export const ScoreService = {
             continue;
           }
 
+          // Temporada real de la competición según sus fechas de inicio/fin.
+          const seasonStart = (comp.currentSeason?.startDate || '').slice(0, 4);
+          const seasonEnd = (comp.currentSeason?.endDate || '').slice(0, 4);
+          const season =
+            seasonStart && seasonEnd
+              ? seasonStart === seasonEnd
+                ? seasonStart
+                : `${seasonStart}/${seasonEnd}`
+              : inferTournamentSeason('FÚTBOL', name);
+
           results.push({
             id: `football-comp-${comp.id}`,
             name,
@@ -4117,6 +4320,7 @@ export const ScoreService = {
             tier: resolveTournamentTier('FÚTBOL', name),
             region: resolveMatchRegion('FÚTBOL', name, undefined, undefined, undefined, comp.area?.code),
             externalId: comp.code || comp.id,
+            season,
             description: comp.area?.name ? `Competición de ${comp.area.name}` : undefined,
           });
         }
