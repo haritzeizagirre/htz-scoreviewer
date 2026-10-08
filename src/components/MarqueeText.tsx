@@ -35,7 +35,10 @@ const USE_NATIVE_DRIVER = Platform.OS !== 'web';
  * cabe en el ancho disponible. Si cabe, se muestra estático en su sitio.
  *
  * Se apoya en un ScrollView horizontal deshabilitado (y sin recepción de toques)
- * como medidor: así se conoce el ancho real del texto aunque supere el contenedor.
+ * para recortar el texto, pero el ancho real del texto se mide en su propia vista
+ * contenedora: el tamaño de contenido del ScrollView queda contaminado por el
+ * `minWidth: '100%'` del contenedor (en Android puede reportar el ancho
+ * disponible en lugar del ancho del texto) y provocaba desplazamientos falsos.
  *
  * Para que mida bien, el contenedor debe tener un ancho acotado por el padre
  * (por ejemplo `containerStyle={{ flex: 1, minWidth: 0 }}` dentro de una fila).
@@ -101,9 +104,11 @@ export const MarqueeText: React.FC<MarqueeTextProps> = ({
           align === 'center' && styles.scrollContentCenter,
           align === 'right' && styles.scrollContentRight,
         ]}
-        onContentSizeChange={(w: number) => setContentWidth(w)}
       >
-        <Animated.View style={{ transform: [{ translateX }] }}>
+        <Animated.View
+          style={{ transform: [{ translateX }] }}
+          onLayout={(e: LayoutChangeEvent) => setContentWidth(e.nativeEvent.layout.width)}
+        >
           <Text style={textStyle} numberOfLines={1}>
             {text}
           </Text>

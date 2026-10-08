@@ -1,5 +1,6 @@
 import React from 'react';
-import { Modal, View, StyleSheet, SafeAreaView } from 'react-native';
+import { Modal, View, StyleSheet } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { TournamentItem } from '../services/types';
 import { TournamentDetailView } from './TournamentDetailView';
 import { htzTokens } from './htz/tokens';
@@ -34,19 +35,24 @@ export const TournamentDetailModal: React.FC<TournamentDetailModalProps> = ({
       presentationStyle="pageSheet"
       onRequestClose={onClose}
     >
-      <SafeAreaView style={styles.safeArea}>
-        <View style={styles.container}>
-          <TournamentDetailView
-            tournament={tournament}
-            onBack={onClose}
-            isFavorite={isFavorite}
-            onToggleFavorite={onToggleFavorite}
-            pandaToken={pandaToken}
-            footballToken={footballToken}
-            favoriteTeams={favoriteTeams}
-          />
-        </View>
-      </SafeAreaView>
+      {/* El modal vive en su propia ventana nativa: se necesita un SafeAreaProvider
+          propio para que los insets sean los de esa ventana y la cabecera no quede
+          bajo la barra de estado en Android. */}
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.safeArea}>
+          <View style={styles.container}>
+            <TournamentDetailView
+              tournament={tournament}
+              onBack={onClose}
+              isFavorite={isFavorite}
+              onToggleFavorite={onToggleFavorite}
+              pandaToken={pandaToken}
+              footballToken={footballToken}
+              favoriteTeams={favoriteTeams}
+            />
+          </View>
+        </SafeAreaView>
+      </SafeAreaProvider>
     </Modal>
   );
 };

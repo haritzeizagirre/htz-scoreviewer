@@ -4,12 +4,12 @@ import {
   View,
   Text,
   StyleSheet,
-  SafeAreaView,
   ScrollView,
   TouchableOpacity,
   Image,
   ActivityIndicator,
 } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import {
   ArrowLeft,
   Star,
@@ -80,148 +80,153 @@ export const TeamDetailModal: React.FC<TeamDetailModalProps> = ({
       presentationStyle="pageSheet"
       onRequestClose={onClose}
     >
-      <SafeAreaView style={styles.safeArea}>
-        <View style={styles.container}>
-          {/* Cabecera */}
-          <View style={styles.topHeader}>
-            <TouchableOpacity style={styles.backBtn} onPress={onClose} activeOpacity={0.7}>
-              <ArrowLeft size={18} color={htzTokens.colors.onSurface} />
-              <Text style={styles.backBtnText}>Volver</Text>
-            </TouchableOpacity>
+      {/* El modal vive en su propia ventana nativa: se necesita un SafeAreaProvider
+          propio para que los insets sean los de esa ventana y la cabecera no quede
+          bajo la barra de estado en Android. */}
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.safeArea}>
+          <View style={styles.container}>
+            {/* Cabecera */}
+            <View style={styles.topHeader}>
+              <TouchableOpacity style={styles.backBtn} onPress={onClose} activeOpacity={0.7}>
+                <ArrowLeft size={18} color={htzTokens.colors.onSurface} />
+                <Text style={styles.backBtnText}>Volver</Text>
+              </TouchableOpacity>
 
-            <TouchableOpacity
-              style={[styles.favBtn, isFavorite && styles.favBtnActive]}
-              onPress={() => onToggleFavorite(team)}
-              activeOpacity={0.7}
-              accessibilityRole="button"
-              accessibilityLabel={
-                isFavorite
-                  ? `Quitar ${team.name} de favoritos`
-                  : `Añadir ${team.name} a favoritos`
-              }
-            >
-              <Star
-                size={18}
-                color={isFavorite ? '#FBBF24' : htzTokens.colors.outline}
-                fill={isFavorite ? '#FBBF24' : 'transparent'}
-              />
-            </TouchableOpacity>
-          </View>
+              <TouchableOpacity
+                style={[styles.favBtn, isFavorite && styles.favBtnActive]}
+                onPress={() => onToggleFavorite(team)}
+                activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  isFavorite
+                    ? `Quitar ${team.name} de favoritos`
+                    : `Añadir ${team.name} a favoritos`
+                }
+              >
+                <Star
+                  size={18}
+                  color={isFavorite ? '#FBBF24' : htzTokens.colors.outline}
+                  fill={isFavorite ? '#FBBF24' : 'transparent'}
+                />
+              </TouchableOpacity>
+            </View>
 
-          <ScrollView style={styles.scrollBody} contentContainerStyle={styles.scrollContent}>
-            {/* Tarjeta de identidad */}
-            <HtzCard style={styles.heroCard}>
-              <View style={styles.heroRow}>
-                <View style={styles.heroLogoBox}>
-                  {team.logo ? (
-                    <Image source={{ uri: team.logo }} style={styles.heroLogo} />
-                  ) : (
-                    <Shield size={30} color={htzTokens.colors.primary} />
-                  )}
-                </View>
+            <ScrollView style={styles.scrollBody} contentContainerStyle={styles.scrollContent}>
+              {/* Tarjeta de identidad */}
+              <HtzCard style={styles.heroCard}>
+                <View style={styles.heroRow}>
+                  <View style={styles.heroLogoBox}>
+                    {team.logo ? (
+                      <Image source={{ uri: team.logo }} style={styles.heroLogo} />
+                    ) : (
+                      <Shield size={30} color={htzTokens.colors.primary} />
+                    )}
+                  </View>
 
-                <View style={styles.heroInfo}>
-                  <Text style={styles.teamName}>{team.name}</Text>
-                  <View style={styles.badgesRow}>
-                    <View style={styles.gameBadge}>
-                      <GameLogo game={team.game} size={12} />
-                      <Text style={styles.gameBadgeText}>{team.game}</Text>
+                  <View style={styles.heroInfo}>
+                    <Text style={styles.teamName}>{team.name}</Text>
+                    <View style={styles.badgesRow}>
+                      <View style={styles.gameBadge}>
+                        <GameLogo game={team.game} size={12} />
+                        <Text style={styles.gameBadgeText}>{team.game}</Text>
+                      </View>
+                      {team.shortName ? (
+                        <HtzBadge variant="secondary" label={team.shortName} />
+                      ) : null}
+                      {team.region ? (
+                        <View style={styles.regionBadge}>
+                          <Text style={styles.regionBadgeText}>{team.region}</Text>
+                        </View>
+                      ) : null}
                     </View>
-                    {team.shortName ? (
-                      <HtzBadge variant="secondary" label={team.shortName} />
-                    ) : null}
-                    {team.region ? (
-                      <View style={styles.regionBadge}>
-                        <Text style={styles.regionBadgeText}>{team.region}</Text>
+                    {team.location ? (
+                      <View style={styles.locationRow}>
+                        <MapPin size={12} color={htzTokens.colors.outline} />
+                        <Text style={styles.locationText}>{team.location}</Text>
                       </View>
                     ) : null}
                   </View>
-                  {team.location ? (
-                    <View style={styles.locationRow}>
-                      <MapPin size={12} color={htzTokens.colors.outline} />
-                      <Text style={styles.locationText}>{team.location}</Text>
-                    </View>
-                  ) : null}
                 </View>
-              </View>
-            </HtzCard>
+              </HtzCard>
 
-            {/* Plantilla conocida */}
-            {roster.length > 0 && (
+              {/* Plantilla conocida */}
+              {roster.length > 0 && (
+                <HtzCard style={styles.sectionCard}>
+                  <View style={styles.sectionHeaderRow}>
+                    <Users size={15} color={htzTokens.colors.primary} />
+                    <Text style={styles.sectionTitle}>Plantilla</Text>
+                  </View>
+                  {roster.map((player) => (
+                    <View key={`${player.id ?? player.name}`} style={styles.playerRow}>
+                      <Text style={styles.playerName}>{player.name}</Text>
+                      {player.role ? <Text style={styles.playerRole}>{player.role}</Text> : null}
+                      {typeof player.number === 'number' ? (
+                        <Text style={styles.playerNumber}>#{player.number}</Text>
+                      ) : null}
+                    </View>
+                  ))}
+                </HtzCard>
+              )}
+
+              {/* Partidos */}
               <HtzCard style={styles.sectionCard}>
                 <View style={styles.sectionHeaderRow}>
-                  <Users size={15} color={htzTokens.colors.primary} />
-                  <Text style={styles.sectionTitle}>Plantilla</Text>
-                </View>
-                {roster.map((player) => (
-                  <View key={`${player.id ?? player.name}`} style={styles.playerRow}>
-                    <Text style={styles.playerName}>{player.name}</Text>
-                    {player.role ? <Text style={styles.playerRole}>{player.role}</Text> : null}
-                    {typeof player.number === 'number' ? (
-                      <Text style={styles.playerNumber}>#{player.number}</Text>
-                    ) : null}
-                  </View>
-                ))}
-              </HtzCard>
-            )}
-
-            {/* Partidos */}
-            <HtzCard style={styles.sectionCard}>
-              <View style={styles.sectionHeaderRow}>
-                <Text style={styles.sectionTitle}>Partidos</Text>
-                <Text style={styles.sectionCount}>
-                  {loading ? '' : `(${ordered.length})`}
-                </Text>
-              </View>
-
-              {loading ? (
-                <View style={styles.loadingBox}>
-                  <ActivityIndicator size="small" color={htzTokens.colors.primary} />
-                  <Text style={styles.loadingText}>Cargando partidos…</Text>
-                </View>
-              ) : ordered.length === 0 ? (
-                <View style={styles.emptyBox}>
-                  <AlertCircle size={18} color={htzTokens.colors.outline} />
-                  <Text style={styles.emptyText}>
-                    {missingTokenHint ||
-                      'No hay partidos recientes ni próximos de este equipo en este momento.'}
+                  <Text style={styles.sectionTitle}>Partidos</Text>
+                  <Text style={styles.sectionCount}>
+                    {loading ? '' : `(${ordered.length})`}
                   </Text>
                 </View>
-              ) : (
-                ordered.slice(0, 12).map((m) => (
-                  <View key={m.id} style={styles.matchRow}>
-                    <View
-                      style={[
-                        styles.matchStatusDot,
-                        m.status === 'LIVE'
-                          ? styles.matchStatusLive
-                          : m.status === 'UPCOMING'
-                          ? styles.matchStatusUpcoming
-                          : styles.matchStatusFinished,
-                      ]}
-                    />
-                    <View style={styles.matchInfo}>
-                      <Text style={styles.matchLeague} numberOfLines={1}>
-                        {m.league}
-                      </Text>
-                      <Text style={styles.matchTeams} numberOfLines={1}>
-                        {m.teamA.shortName || m.teamA.name} vs {m.teamB.shortName || m.teamB.name}
-                      </Text>
-                    </View>
-                    <Text style={styles.matchWhen}>
-                      {m.status === 'LIVE'
-                        ? 'EN DIRECTO'
-                        : m.status === 'FINISHED'
-                        ? `${m.teamA.score} - ${m.teamB.score}`
-                        : m.timeInfo}
+
+                {loading ? (
+                  <View style={styles.loadingBox}>
+                    <ActivityIndicator size="small" color={htzTokens.colors.primary} />
+                    <Text style={styles.loadingText}>Cargando partidos…</Text>
+                  </View>
+                ) : ordered.length === 0 ? (
+                  <View style={styles.emptyBox}>
+                    <AlertCircle size={18} color={htzTokens.colors.outline} />
+                    <Text style={styles.emptyText}>
+                      {missingTokenHint ||
+                        'No hay partidos recientes ni próximos de este equipo en este momento.'}
                     </Text>
                   </View>
-                ))
-              )}
-            </HtzCard>
-          </ScrollView>
-        </View>
-      </SafeAreaView>
+                ) : (
+                  ordered.slice(0, 12).map((m) => (
+                    <View key={m.id} style={styles.matchRow}>
+                      <View
+                        style={[
+                          styles.matchStatusDot,
+                          m.status === 'LIVE'
+                            ? styles.matchStatusLive
+                            : m.status === 'UPCOMING'
+                            ? styles.matchStatusUpcoming
+                            : styles.matchStatusFinished,
+                        ]}
+                      />
+                      <View style={styles.matchInfo}>
+                        <Text style={styles.matchLeague} numberOfLines={1}>
+                          {m.league}
+                        </Text>
+                        <Text style={styles.matchTeams} numberOfLines={1}>
+                          {m.teamA.shortName || m.teamA.name} vs {m.teamB.shortName || m.teamB.name}
+                        </Text>
+                      </View>
+                      <Text style={styles.matchWhen}>
+                        {m.status === 'LIVE'
+                          ? 'EN DIRECTO'
+                          : m.status === 'FINISHED'
+                          ? `${m.teamA.score} - ${m.teamB.score}`
+                          : m.timeInfo}
+                      </Text>
+                    </View>
+                  ))
+                )}
+              </HtzCard>
+            </ScrollView>
+          </View>
+        </SafeAreaView>
+      </SafeAreaProvider>
     </Modal>
   );
 };

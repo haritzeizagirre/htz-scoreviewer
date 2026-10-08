@@ -6,8 +6,8 @@ import {
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  SafeAreaView,
 } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { Bell, BellOff, ChevronDown, ChevronUp, RotateCcw, X, CloudUpload } from 'lucide-react-native';
 import {
   Gtr3ConfigState,
@@ -275,198 +275,203 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <SafeAreaView style={styles.safeArea}>
-        <View style={styles.container}>
-          {/* Cabecera */}
-          <View style={styles.topHeader}>
-            <View style={styles.titleRow}>
-              <Bell size={18} color={htzTokens.colors.primary} />
-              <Text style={styles.title}>Alertas</Text>
+      {/* El modal vive en su propia ventana nativa: se necesita un SafeAreaProvider
+          propio para que los insets sean los de esa ventana y la cabecera no quede
+          bajo la barra de estado en Android. */}
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.safeArea}>
+          <View style={styles.container}>
+            {/* Cabecera */}
+            <View style={styles.topHeader}>
+              <View style={styles.titleRow}>
+                <Bell size={18} color={htzTokens.colors.primary} />
+                <Text style={styles.title}>Alertas</Text>
+              </View>
+              <TouchableOpacity
+                onPress={onClose}
+                style={styles.closeBtn}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                accessibilityRole="button"
+                accessibilityLabel="Cerrar"
+              >
+                <X size={20} color={htzTokens.colors.outline} />
+              </TouchableOpacity>
             </View>
-            <TouchableOpacity
-              onPress={onClose}
-              style={styles.closeBtn}
-              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-              accessibilityRole="button"
-              accessibilityLabel="Cerrar"
-            >
-              <X size={20} color={htzTokens.colors.outline} />
-            </TouchableOpacity>
-          </View>
 
-          <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
-            {/* Permiso + prueba */}
-            <HtzCard style={styles.card}>
-              <View style={styles.permissionRow}>
-                {permission === 'granted' ? (
-                  <Bell size={16} color={htzTokens.colors.primary} />
-                ) : (
-                  <BellOff size={16} color={htzTokens.colors.outline} />
-                )}
-                <Text style={styles.permissionText}>{PERMISSION_TEXT[permission]}</Text>
-              </View>
-              <View style={styles.actionsRow}>
-                {permission !== 'granted' && permission !== 'unsupported' && (
-                  <HtzButton variant="primary" size="sm" onPress={requestPermission}>
-                    Permitir notificaciones
-                  </HtzButton>
-                )}
-                <HtzButton
-                  variant="secondary"
-                  size="sm"
-                  onPress={testNotification}
-                  disabled={testing}
-                >
-                  {testing ? 'Probando…' : 'Probar notificación'}
-                </HtzButton>
-              </View>
-              <Text style={styles.hint}>
-                En web funcionan con la pestaña abierta (aunque esté en segundo plano). En Android,
-                los recordatorios programados llegan incluso con la app cerrada.
-              </Text>
-            </HtzCard>
-
-            {/* Interruptor maestro */}
-            <HtzCard style={styles.card}>
-              <HtzToggle
-                label="Notificaciones activadas"
-                sublabel="Apágalas para silenciarlo todo sin perder tu configuración"
-                checked={settings.enabled}
-                onChange={setMaster}
-              />
-            </HtzCard>
-
-            {/* Eventos generales */}
-            <Text style={styles.sectionHeader}>Eventos generales</Text>
-            <HtzCard style={styles.card}>
-              <Text style={styles.groupLabel}>Fútbol</Text>
-              {FOOTBALL_EVENT_KEYS.map((key) =>
-                renderEventToggle(key, settings.events[key], (v) => setEvent(key, v))
-              )}
-              <Text style={[styles.groupLabel, styles.groupLabelSpaced]}>Esports</Text>
-              {ESPORTS_EVENT_KEYS.map((key) =>
-                renderEventToggle(key, settings.events[key], (v) => setEvent(key, v))
-              )}
-              <View style={styles.toggleRow}>
-                <Text style={styles.minutesLabel}>Recordatorio previo</Text>
-                <View style={styles.minutesChips}>
-                  {[5, 15, 30].map((mins) => (
-                    <HtzChip
-                      key={mins}
-                      label={`${mins} min`}
-                      selected={settings.reminderMinutes === mins}
-                      onPress={() => setReminderMinutes(mins)}
-                    />
-                  ))}
-                </View>
-              </View>
-            </HtzCard>
-
-            {/* Matriz por favorito */}
-            <Text style={styles.sectionHeader}>Tus torneos favoritos</Text>
-            <HtzCard style={styles.card}>
-              {tournamentGroups.length === 0 ? (
-                <Text style={styles.emptyText}>No tienes torneos favoritos todavía.</Text>
-              ) : (
-                tournamentGroups.map((g) => renderFavoriteGroup(g, 'tournaments'))
-              )}
-            </HtzCard>
-
-            <Text style={styles.sectionHeader}>Tus equipos favoritos</Text>
-            <HtzCard style={styles.card}>
-              {teamGroups.length === 0 ? (
-                <Text style={styles.emptyText}>No tienes equipos favoritos todavía.</Text>
-              ) : (
-                teamGroups.map((g) => renderFavoriteGroup(g, 'teams'))
-              )}
-            </HtzCard>
-
-            {/* Fase 2: push con la app cerrada */}
-            <Text style={styles.sectionHeader}>Push con la app cerrada (Fase 2)</Text>
-            <HtzCard style={styles.card}>
-              {!pushSupported ? (
-                <Text style={styles.hint}>
-                  Solo disponible en la app Android. En web, las alertas funcionan con la
-                  pestaña abierta (Fase 1).
-                </Text>
-              ) : settings.push?.connected ? (
-                <>
-                  <View style={styles.permissionRow}>
-                    <CloudUpload size={16} color={htzTokens.colors.primary} />
-                    <Text style={styles.permissionText}>
-                      Conectado a {settings.push.serverUrl}
-                    </Text>
-                  </View>
-                  {serverStatus ? (
-                    serverStatus.ok ? (
-                      <Text style={styles.serverStatusText}>
-                        Servidor OK · última pasada {formatAgo(serverStatus.lastRunAt)} ·{' '}
-                        {serverStatus.devices ?? 0} dispositivo(s)
-                        {serverStatus.lastError ? `\nÚltimo error: ${serverStatus.lastError}` : ''}
-                      </Text>
-                    ) : (
-                      <Text style={styles.serverStatusText}>
-                        No se pudo consultar el servidor: {serverStatus.error}
-                      </Text>
-                    )
+            <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
+              {/* Permiso + prueba */}
+              <HtzCard style={styles.card}>
+                <View style={styles.permissionRow}>
+                  {permission === 'granted' ? (
+                    <Bell size={16} color={htzTokens.colors.primary} />
                   ) : (
-                    <Text style={styles.serverStatusText}>Consultando estado…</Text>
+                    <BellOff size={16} color={htzTokens.colors.outline} />
                   )}
-                  <View style={styles.actionsRow}>
-                    <HtzButton variant="secondary" size="sm" onPress={testPush} disabled={pushBusy}>
-                      {pushBusy ? 'Enviando…' : 'Enviar prueba'}
+                  <Text style={styles.permissionText}>{PERMISSION_TEXT[permission]}</Text>
+                </View>
+                <View style={styles.actionsRow}>
+                  {permission !== 'granted' && permission !== 'unsupported' && (
+                    <HtzButton variant="primary" size="sm" onPress={requestPermission}>
+                      Permitir notificaciones
                     </HtzButton>
-                    <HtzButton
-                      variant="secondary"
-                      size="sm"
-                      onPress={disconnectPush}
-                      disabled={pushBusy}
-                    >
-                      Desconectar
-                    </HtzButton>
-                  </View>
-                  <Text style={styles.hint}>
-                    Con el push conectado, el servidor envía los avisos (incluso con la app
-                    cerrada) y la app deja de duplicarlos.
-                  </Text>
-                </>
-              ) : (
-                <>
-                  <HtzInput
-                    label="URL del servidor"
-                    placeholder="https://score-viewer-push.xxx.workers.dev"
-                    value={pushUrlDraft}
-                    onChangeText={setPushUrlDraft}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    spellCheck={false}
-                  />
-                  <HtzInput
-                    label="Clave del servidor (AUTH_KEY)"
-                    placeholder="tu clave secreta"
-                    value={pushKeyDraft}
-                    onChangeText={setPushKeyDraft}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    spellCheck={false}
-                    secureTextEntry
-                  />
-                  <HtzButton variant="primary" size="sm" onPress={connectPush} disabled={pushBusy}>
-                    {pushBusy ? 'Conectando…' : 'Conectar'}
+                  )}
+                  <HtzButton
+                    variant="secondary"
+                    size="sm"
+                    onPress={testNotification}
+                    disabled={testing}
+                  >
+                    {testing ? 'Probando…' : 'Probar notificación'}
                   </HtzButton>
-                  <Text style={styles.hint}>
-                    Despliega el servidor incluido en el proyecto (carpeta push-server, gratis en
-                    Cloudflare) y pega aquí su URL y clave. Después, los avisos llegan con la app
-                    cerrada.
-                  </Text>
-                </>
-              )}
-            </HtzCard>
+                </View>
+                <Text style={styles.hint}>
+                  En web funcionan con la pestaña abierta (aunque esté en segundo plano). En Android,
+                  los recordatorios programados llegan incluso con la app cerrada.
+                </Text>
+              </HtzCard>
 
-            <View style={{ height: 30 }} />
-          </ScrollView>
-        </View>
-      </SafeAreaView>
+              {/* Interruptor maestro */}
+              <HtzCard style={styles.card}>
+                <HtzToggle
+                  label="Notificaciones activadas"
+                  sublabel="Apágalas para silenciarlo todo sin perder tu configuración"
+                  checked={settings.enabled}
+                  onChange={setMaster}
+                />
+              </HtzCard>
+
+              {/* Eventos generales */}
+              <Text style={styles.sectionHeader}>Eventos generales</Text>
+              <HtzCard style={styles.card}>
+                <Text style={styles.groupLabel}>Fútbol</Text>
+                {FOOTBALL_EVENT_KEYS.map((key) =>
+                  renderEventToggle(key, settings.events[key], (v) => setEvent(key, v))
+                )}
+                <Text style={[styles.groupLabel, styles.groupLabelSpaced]}>Esports</Text>
+                {ESPORTS_EVENT_KEYS.map((key) =>
+                  renderEventToggle(key, settings.events[key], (v) => setEvent(key, v))
+                )}
+                <View style={styles.toggleRow}>
+                  <Text style={styles.minutesLabel}>Recordatorio previo</Text>
+                  <View style={styles.minutesChips}>
+                    {[5, 15, 30].map((mins) => (
+                      <HtzChip
+                        key={mins}
+                        label={`${mins} min`}
+                        selected={settings.reminderMinutes === mins}
+                        onPress={() => setReminderMinutes(mins)}
+                      />
+                    ))}
+                  </View>
+                </View>
+              </HtzCard>
+
+              {/* Matriz por favorito */}
+              <Text style={styles.sectionHeader}>Tus torneos favoritos</Text>
+              <HtzCard style={styles.card}>
+                {tournamentGroups.length === 0 ? (
+                  <Text style={styles.emptyText}>No tienes torneos favoritos todavía.</Text>
+                ) : (
+                  tournamentGroups.map((g) => renderFavoriteGroup(g, 'tournaments'))
+                )}
+              </HtzCard>
+
+              <Text style={styles.sectionHeader}>Tus equipos favoritos</Text>
+              <HtzCard style={styles.card}>
+                {teamGroups.length === 0 ? (
+                  <Text style={styles.emptyText}>No tienes equipos favoritos todavía.</Text>
+                ) : (
+                  teamGroups.map((g) => renderFavoriteGroup(g, 'teams'))
+                )}
+              </HtzCard>
+
+              {/* Fase 2: push con la app cerrada */}
+              <Text style={styles.sectionHeader}>Push con la app cerrada (Fase 2)</Text>
+              <HtzCard style={styles.card}>
+                {!pushSupported ? (
+                  <Text style={styles.hint}>
+                    Solo disponible en la app Android. En web, las alertas funcionan con la
+                    pestaña abierta (Fase 1).
+                  </Text>
+                ) : settings.push?.connected ? (
+                  <>
+                    <View style={styles.permissionRow}>
+                      <CloudUpload size={16} color={htzTokens.colors.primary} />
+                      <Text style={styles.permissionText}>
+                        Conectado a {settings.push.serverUrl}
+                      </Text>
+                    </View>
+                    {serverStatus ? (
+                      serverStatus.ok ? (
+                        <Text style={styles.serverStatusText}>
+                          Servidor OK · última pasada {formatAgo(serverStatus.lastRunAt)} ·{' '}
+                          {serverStatus.devices ?? 0} dispositivo(s)
+                          {serverStatus.lastError ? `\nÚltimo error: ${serverStatus.lastError}` : ''}
+                        </Text>
+                      ) : (
+                        <Text style={styles.serverStatusText}>
+                          No se pudo consultar el servidor: {serverStatus.error}
+                        </Text>
+                      )
+                    ) : (
+                      <Text style={styles.serverStatusText}>Consultando estado…</Text>
+                    )}
+                    <View style={styles.actionsRow}>
+                      <HtzButton variant="secondary" size="sm" onPress={testPush} disabled={pushBusy}>
+                        {pushBusy ? 'Enviando…' : 'Enviar prueba'}
+                      </HtzButton>
+                      <HtzButton
+                        variant="secondary"
+                        size="sm"
+                        onPress={disconnectPush}
+                        disabled={pushBusy}
+                      >
+                        Desconectar
+                      </HtzButton>
+                    </View>
+                    <Text style={styles.hint}>
+                      Con el push conectado, el servidor envía los avisos (incluso con la app
+                      cerrada) y la app deja de duplicarlos.
+                    </Text>
+                  </>
+                ) : (
+                  <>
+                    <HtzInput
+                      label="URL del servidor"
+                      placeholder="https://score-viewer-push.xxx.workers.dev"
+                      value={pushUrlDraft}
+                      onChangeText={setPushUrlDraft}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      spellCheck={false}
+                    />
+                    <HtzInput
+                      label="Clave del servidor (AUTH_KEY)"
+                      placeholder="tu clave secreta"
+                      value={pushKeyDraft}
+                      onChangeText={setPushKeyDraft}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      spellCheck={false}
+                      secureTextEntry
+                    />
+                    <HtzButton variant="primary" size="sm" onPress={connectPush} disabled={pushBusy}>
+                      {pushBusy ? 'Conectando…' : 'Conectar'}
+                    </HtzButton>
+                    <Text style={styles.hint}>
+                      Despliega el servidor incluido en el proyecto (carpeta push-server, gratis en
+                      Cloudflare) y pega aquí su URL y clave. Después, los avisos llegan con la app
+                      cerrada.
+                    </Text>
+                  </>
+                )}
+              </HtzCard>
+
+              <View style={{ height: 30 }} />
+            </ScrollView>
+          </View>
+        </SafeAreaView>
+      </SafeAreaProvider>
     </Modal>
   );
 };
