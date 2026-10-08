@@ -14,6 +14,9 @@ import {
   TeamCatalogItem,
   LiveRoundScore,
   MatchSourceStatus,
+  TeamFormEntry,
+  HeadToHeadEntry,
+  MatchPreviewData,
 } from './types';
 import { formatMatchSchedule } from './dateUtils';
 
@@ -813,6 +816,12 @@ export function resolveMasterTournamentId(
         if (isChallengers || isAscension || isGameChangers) return null;
 
         const isVCT = text.includes('vct') || text.includes('valorant champions tour');
+        // El Mundial "Valorant Champions <año>" no incluye "Tour": se detecta aparte
+        // para que los partidos del scraper VLR (sin token) resuelvan a su torneo
+        // maestro y casen de forma autoritativa con los favoritos.
+        if (!isVCT && text.includes('valorant') && text.includes('champions')) {
+          return 'vlr-champions';
+        }
         if (isVCT) {
           if (text.includes('emea')) return 'vlr-emea';
           if (text.includes('americas')) return 'vlr-americas';
@@ -2667,6 +2676,128 @@ function filterMatchesByTeam(matches: Match[], team: TeamCatalogItem): Match[] {
   });
 }
 
+/**
+ * Consulta GET contra la API de Football-Data.org (vía proxy local en web).
+ * Devuelve el JSON parseado o null si falla.
+ */
+async function fetchFootballEndpoint(token: string, path: string): Promise<any | null> {
+  const cleanToken = token.trim();
+  if (!cleanToken || !path) return null;
+  const isWeb = Platform.OS === 'web';
+
+  if (isWeb) {
+    try {
+      const proxyUrl = `/api/proxy/football?token=${encodeURIComponent(cleanToken)}&path=${encodeURIComponent(path)}`;
+      const res = await fetch(proxyUrl);
+      if (res.ok) return await res.json();
+    } catch (err) {
+      console.warn(`Proxy Football-Data (${path}) falló:`, err);
+    }
+    return null;
+  }
+
+  try {
+    const res = await fetch(`https://api.football-data.org${path}`, {
+      headers: { 'X-Auth-Token': cleanToken, Accept: 'application/json' },
+    });
+    if (res.ok) return await res.json();
+  } catch (err) {
+    console.warn(`Llamada directa Football-Data (${path}) falló:`, err);
+  }
+  return null;
+}
+
+/** Caché en memoria de las previas (forma + H2H) para no repetir consultas. */
+const MATCH_PREVIEW_CACHE = new Map<string, { ts: number; data: MatchPreviewData }>();
+const MATCH_PREVIEW_TTL_MS = 10 * 60 * 1000;
+
+/** Convierte un partido crudo de PandaScore en una entrada de forma reciente. */
+function toPandaFormEntry(raw: any, teamId: number | string): TeamFormEntry | null {
+  const opponents = raw?.opponents || [];
+  const ours = opponents.find((o: any) => o?.opponent?.id === teamId)?.opponent;
+  const other = opponents.find((o: any) => o?.opponent?.id !== teamId)?.opponent;
+  if (!ours || !other) return null;
+
+  const ourScore = raw.results?.find((r: any) => r.team_id === teamId)?.score;
+  const otherScore = raw.results?.find((r: any) => r.team_id === other.id)?.score;
+  const draw = raw.winner_id == null;
+  return {
+    dateIso: raw.begin_at || raw.end_at || '',
+    league: raw.league?.name || raw.serie?.full_name || undefined,
+    opponentName: other.name || 'Rival',
+    scoreFor: typeof ourScore === 'number' ? ourScore : '-',
+    scoreAgainst: typeof otherScore === 'number' ? otherScore : '-',
+    result: raw.winner_id === teamId ? 'W' : draw ? 'D' : 'L',
+  };
+}
+
+/** Convierte un enfrentamiento crudo de PandaScore en una entrada de cara a cara. */
+function toPandaH2HEntry(raw: any, teamAId: number | string, teamBId: number | string): HeadToHeadEntry | null {
+  const oppA = (raw?.opponents || []).find((o: any) => o?.opponent?.id === teamAId)?.opponent;
+  const oppB = (raw?.opponents || []).find((o: any) => o?.opponent?.id === teamBId)?.opponent;
+  if (!oppA || !oppB) return null;
+  const scoreA = raw.results?.find((r: any) => r.team_id === teamAId)?.score;
+  const scoreB = raw.results?.find((r: any) => r.team_id === teamBId)?.score;
+  return {
+    dateIso: raw.begin_at || raw.end_at || '',
+    league: raw.league?.name || raw.serie?.full_name || undefined,
+    teamA: oppA.name || 'Equipo A',
+    teamB: oppB.name || 'Equipo B',
+    scoreA: typeof scoreA === 'number' ? scoreA : '-',
+    scoreB: typeof scoreB === 'number' ? scoreB : '-',
+  };
+}
+
+/** Convierte un partido crudo de Football-Data en una entrada de forma reciente. */
+function toFootballFormEntry(raw: any, teamId: number | string): TeamFormEntry | null {
+  const home = raw?.homeTeam || {};
+  const away = raw?.awayTeam || {};
+  const isHome = String(home.id) === String(teamId);
+  const theirs = isHome ? away : home;
+  const h = raw?.score?.fullTime?.home;
+  const a = raw?.score?.fullTime?.away;
+  if (typeof h !== 'number' || typeof a !== 'number') return null;
+  const winner = raw?.score?.winner; // 'HOME_TEAM' | 'AWAY_TEAM' | 'DRAW'
+  const result: TeamFormEntry['result'] =
+    winner === 'DRAW' ? 'D' : (winner === 'HOME_TEAM') === isHome ? 'W' : 'L';
+  return {
+    dateIso: raw.utcDate || '',
+    league: raw.competition?.name || undefined,
+    opponentName: theirs.name || 'Rival',
+    scoreFor: isHome ? h : a,
+    scoreAgainst: isHome ? a : h,
+    result,
+  };
+}
+
+/** Convierte un enfrentamiento crudo de Football-Data en una entrada de cara a cara. */
+function toFootballH2HEntry(raw: any): HeadToHeadEntry | null {
+  const h = raw?.score?.fullTime?.home;
+  const a = raw?.score?.fullTime?.away;
+  if (typeof h !== 'number' || typeof a !== 'number') return null;
+  return {
+    dateIso: raw.utcDate || '',
+    league: raw.competition?.name || undefined,
+    teamA: raw.homeTeam?.name || 'Local',
+    teamB: raw.awayTeam?.name || 'Visitante',
+    scoreA: h,
+    scoreB: a,
+  };
+}
+
+/** Limpia el texto de un bloque HTML de vlr.gg (tags y entidades básicas). */
+function cleanVlrText(raw: string): string {
+  return raw
+    .replace(/<[^>]+>/g, '')
+    .replace(/&ndash;/g, '-')
+    .replace(/&mdash;/g, '-')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export const ScoreService = {
   async fetchAllMatches(config: {
     pandaToken?: string;
@@ -3199,6 +3330,118 @@ export const ScoreService = {
     return filterMatchesByTeam(matches, team);
   },
 
+  /**
+   * Previa de un partido: forma reciente de ambos equipos y cara a cara.
+   * Usa PandaScore (esports) o Football-Data (fútbol) según el partido y los
+   * tokens disponibles. Devuelve null si no hay fuente aplicable.
+   */
+  async fetchMatchPreview(
+    match: Match,
+    tokens: { pandaToken?: string; footballToken?: string }
+  ): Promise<MatchPreviewData | null> {
+    if (!match || match.teamA?.id == null || match.teamB?.id == null) return null;
+
+    const cacheKey =
+      match.game === 'FÚTBOL'
+        ? `foot-${match.id}`
+        : `panda-${match.teamA.id}-${match.teamB.id}`;
+    const cached = MATCH_PREVIEW_CACHE.get(cacheKey);
+    if (cached && Date.now() - cached.ts < MATCH_PREVIEW_TTL_MS) return cached.data;
+
+    let data: MatchPreviewData | null = null;
+    if (match.game === 'FÚTBOL') {
+      const token = (tokens.footballToken || '').trim();
+      if (!token) return null;
+      data = await this.fetchFootballPreview(match, token);
+    } else {
+      const token = (tokens.pandaToken || '').trim();
+      if (!token) return null;
+      data = await this.fetchPandaPreview(match, token);
+    }
+
+    if (data) MATCH_PREVIEW_CACHE.set(cacheKey, { ts: Date.now(), data });
+    return data;
+  },
+
+  /** Previa con PandaScore: últimos partidos de cada equipo + cruces entre ambos. */
+  async fetchPandaPreview(match: Match, token: string): Promise<MatchPreviewData | null> {
+    const teamAId = match.teamA.id!;
+    const teamBId = match.teamB.id!;
+    try {
+      const [rawA, rawB] = await Promise.all([
+        fetchPandaEndpoint(
+          token,
+          `/matches?filter[opponent_id]=${teamAId}&filter[status]=finished&sort=-begin_at&per_page=50`
+        ),
+        fetchPandaEndpoint(
+          token,
+          `/matches?filter[opponent_id]=${teamBId}&filter[status]=finished&sort=-begin_at&per_page=50`
+        ),
+      ]);
+
+      const formA = rawA
+        .slice(0, 5)
+        .map((r) => toPandaFormEntry(r, teamAId))
+        .filter((e): e is TeamFormEntry => Boolean(e));
+      const formB = rawB
+        .slice(0, 5)
+        .map((r) => toPandaFormEntry(r, teamBId))
+        .filter((e): e is TeamFormEntry => Boolean(e));
+      const h2h = rawA
+        .filter((r) => (r.opponents || []).some((o: any) => o?.opponent?.id === teamBId))
+        .slice(0, 5)
+        .map((r) => toPandaH2HEntry(r, teamAId, teamBId))
+        .filter((e): e is HeadToHeadEntry => Boolean(e));
+
+      if (formA.length === 0 && formB.length === 0 && h2h.length === 0) return null;
+      return { formA, formB, h2h };
+    } catch (err) {
+      console.warn('Error consultando la previa (PandaScore):', err);
+      return null;
+    }
+  },
+
+  /** Previa con Football-Data: forma de ambos equipos + H2H del partido. */
+  async fetchFootballPreview(match: Match, token: string): Promise<MatchPreviewData | null> {
+    const teamAId = match.teamA.id!;
+    const teamBId = match.teamB.id!;
+    const rawMatchId = String(match.id).replace(/^foot-/, '');
+    const today = new Date().toISOString().split('T')[0];
+    const from = new Date(Date.now() - 120 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    try {
+      const [formARes, formBRes, h2hRes] = await Promise.all([
+        fetchFootballEndpoint(token, `/v4/teams/${teamAId}/matches?status=FINISHED&dateFrom=${from}&dateTo=${today}`),
+        fetchFootballEndpoint(token, `/v4/teams/${teamBId}/matches?status=FINISHED&dateFrom=${from}&dateTo=${today}`),
+        fetchFootballEndpoint(token, `/v4/matches/${rawMatchId}/head2head?limit=10`),
+      ]);
+
+      // Ordenar en cliente por fecha descendente (la API no garantiza orden).
+      const recentFirst = (res: any) =>
+        [...((res?.matches as any[]) || [])].sort(
+          (x, y) => new Date(y.utcDate).getTime() - new Date(x.utcDate).getTime()
+        );
+
+      const formA = recentFirst(formARes)
+        .slice(0, 5)
+        .map((r) => toFootballFormEntry(r, teamAId))
+        .filter((e): e is TeamFormEntry => Boolean(e));
+      const formB = recentFirst(formBRes)
+        .slice(0, 5)
+        .map((r) => toFootballFormEntry(r, teamBId))
+        .filter((e): e is TeamFormEntry => Boolean(e));
+      const h2h = recentFirst(h2hRes)
+        .slice(0, 5)
+        .map((r) => toFootballH2HEntry(r))
+        .filter((e): e is HeadToHeadEntry => Boolean(e));
+
+      if (formA.length === 0 && formB.length === 0 && h2h.length === 0) return null;
+      return { formA, formB, h2h };
+    } catch (err) {
+      console.warn('Error consultando la previa (Football-Data):', err);
+      return null;
+    }
+  },
+
   async fetchFootball(token: string): Promise<Match[]> {
     const cleanToken = token.trim();
     if (!cleanToken) return [];
@@ -3356,7 +3599,7 @@ export const ScoreService = {
       const html = await res.text();
 
       // Buscar bloques de partidos marcados como mod-live o LIVE
-      const liveItems: { href: string; teams: string[]; league?: string }[] = [];
+      const liveItems: { href: string; teams: string[]; league?: string; series?: string }[] = [];
       const chunks = html.split(/<a[^>]+href="(\/[0-9]+\/[^"]+)"[^>]*class="[^"]*match-item[^"]*"[^>]*>/i);
       for (let i = 1; i < chunks.length; i += 2) {
         const href = chunks[i];
@@ -3365,11 +3608,21 @@ export const ScoreService = {
           const teams = [...chunk.matchAll(/<div class="match-item-vs-team-name"[^>]*>([\s\S]*?)<\/div>/g)]
             .map((m) => m[1].replace(/<[^>]+>/g, '').trim())
             .filter(Boolean);
-          const eventMatch = chunk.match(/<div class="match-item-event[^"]*"[^>]*>([\s\S]*?)<\/div>/);
-          const league = eventMatch
-            ? eventMatch[1].replace(/<[^>]+>/g, '').replace(/&ndash;/g, '-').replace(/\s+/g, ' ').trim()
-            : 'VCT Valorant';
-          liveItems.push({ href, teams, league });
+
+          // El bloque del evento anida la fase/serie en un div interno
+          // (`match-item-event-series`). Si se captura el primer `</div>` se guarda
+          // la serie ("Playoffs-Upper Quarterfinals") como nombre del torneo y el
+          // partido deja de casar con los favoritos del usuario. Se extrae primero
+          // la serie, se elimina del bloque y el resto es el torneo real
+          // ("Valorant Champions 2026").
+          const seriesMatch = chunk.match(
+            /<div class="match-item-event-series[^"]*"[^>]*>([\s\S]*?)<\/div>/i
+          );
+          const series = seriesMatch ? cleanVlrText(seriesMatch[1]) : undefined;
+          const chunkWithoutSeries = seriesMatch ? chunk.replace(seriesMatch[0], '') : chunk;
+          const eventMatch = chunkWithoutSeries.match(/<div class="match-item-event[^"]*"[^>]*>([\s\S]*?)<\/div>/);
+          const league = eventMatch ? cleanVlrText(eventMatch[1]) : series || 'VCT Valorant';
+          liveItems.push({ href, teams, league, series });
         }
       }
 
@@ -3511,7 +3764,9 @@ export const ScoreService = {
                 }
               : undefined,
             details: {
-              tournamentStage: item.league,
+              // La fase/serie real del partido ("Playoffs-Upper Quarterfinals") va
+              // aparte; el torneo ya va en `league`.
+              tournamentStage: item.series || item.league,
               bestOf: gamesBreakdown.length || 3,
               roundOrMap: undefined,
               streams: getDefaultStreams('VALORANT', item.league),

@@ -37,6 +37,7 @@ import {
   RotateCcw,
   Eye,
   EyeOff,
+  Bell,
 } from 'lucide-react-native';
 import { SubAppProps } from './types';
 import {
@@ -48,8 +49,23 @@ import {
   TournamentItem,
   TeamCatalogItem,
   MatchSourceStatus,
+  NotificationEventPrefs,
+  NotificationSettings,
 } from './services/types';
 import { ScoreService, isGameCategoryEnabled } from './services/scoreService';
+import {
+  MatchSnapshot,
+  toMatchSnapshot,
+  diffMatchEvents,
+  findUpcomingReminders,
+} from './services/matchEvents';
+import {
+  DEFAULT_NOTIFICATION_SETTINGS,
+  createMatchPrefsResolver,
+} from './services/notificationEngine';
+import { AppNotifications } from './services/notificationService';
+import { PushService } from './services/pushService';
+import { NotificationsModal } from './components/NotificationsModal';
 import { MatchGroup } from './components/MatchGroup';
 import { MatchDetailModal } from './components/MatchDetailModal';
 import { GameManagementModal } from './components/GameManagementModal';
@@ -128,6 +144,24 @@ const STATUS_EMPTY_SUBTITLES: Record<MatchStatus, string> = {
   UPCOMING: 'No hay partidos programados de tus equipos o torneos favoritos en los próximos días.',
   FINISHED: 'No hay partidos finalizados recientes de tus equipos o torneos favoritos.',
 };
+
+/** Clave local (YYYY-MM-DD) de una fecha, para agrupar partidos por día. */
+function localDayKey(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+/** Etiqueta corta del día para la tira semanal: Hoy / Mañana / "Mié 9". */
+function dayChipLabel(date: Date): string {
+  const key = localDayKey(date);
+  const today = new Date();
+  if (key === localDayKey(today)) return 'Hoy';
+  if (key === localDayKey(new Date(today.getTime() + 24 * 60 * 60 * 1000))) return 'Mañana';
+  const label = date.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric' });
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
 
 /** "hace X" legible para el indicador de última actualización. */
 function formatRelativeTime(ts: number): string {
@@ -220,6 +254,15 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   const requestSeqRef = useRef(0);
   // Momento del último fetch completado con éxito (para decidir si conviene refrescar).
   const lastLoadAtRef = useRef(0);
+  // Momento en que arrancó la última carga (para el auto-refresco periódico).
+  const lastLoadStartRef = useRef(0);
+  // Auto-refresco: con directos se refresca más a menudo.
+  const hasLiveRef = useRef(false);
+  // Motor de alertas: estado anterior de cada partido y eventos ya notificados.
+  const matchSnapshotsRef = useRef<Map<string, MatchSnapshot>>(new Map());
+  const notifiedEventsRef = useRef<Set<string>>(new Set());
+  const remindedEventsRef = useRef<Set<string>>(new Set());
+  const notifEngineReadyRef = useRef(false);
   const [selectedMatch, setSelectedMatch] = useState<Match | null>(null);
   const [selectedTournament, setSelectedTournament] = useState<TournamentItem | null>(null);
 
@@ -228,6 +271,8 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   const [tierFilter, setTierFilter] = useState<TierFilterOption>('TODOS');
   const [regionFilter, setRegionFilter] = useState<RegionFilterOption>('TODOS');
   const [searchQuery, setSearchQuery] = useState('');
+  // Día seleccionado en la tira semanal de la página "Próximos" (null = todos).
+  const [weekDayFilter, setWeekDayFilter] = useState<string | null>(null);
 
   // Pestañas deslizables de estado del partido (Finalizados | En Directo | Próximos)
   const [statusTab, setStatusTab] = useState<MatchStatus>('UPCOMING');
@@ -267,6 +312,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     showFavoriteRecentResults: true,
     showTeamLogos: true,
     maxMatches: 15,
+    notifications: DEFAULT_NOTIFICATION_SETTINGS,
   });
 
   // Borradores locales de los tokens de la pestaña APIs. Se editan aquí y solo se
@@ -294,7 +340,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   const [sourceStatus, setSourceStatus] = useState<MatchSourceStatus[]>([]);
   const [lastUpdatedAt, setLastUpdatedAt] = useState(0);
   // Fuerza un re-render periódico para refrescar el "hace X".
-  const [clockTick, setClockTick] = useState(0);
+  const [, setClockTick] = useState(0);
   useEffect(() => {
     const timer = setInterval(() => setClockTick((v) => v + 1), 30_000);
     return () => clearInterval(timer);
@@ -303,8 +349,10 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   // Modales
   const [gamesModalVisible, setGamesModalVisible] = useState(false);
   const [filterModalVisible, setFilterModalVisible] = useState(false);
-  // Panel plegable superior con los filtros de deporte / competición
-  const [filtersPanelOpen, setFiltersPanelOpen] = useState(true);
+  const [notificationsModalVisible, setNotificationsModalVisible] = useState(false);
+  // Panel plegable superior con los filtros de deporte / competición (plegado por
+  // defecto: la cabecera se queda en una sola fila y se abre con un toque).
+  const [filtersPanelOpen, setFiltersPanelOpen] = useState(false);
 
   // Contador de filtros de competición activos (Tier / Región)
   const activeFiltersCount =
@@ -316,6 +364,22 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   const hasAnyApiToken = Boolean(
     watchConfig.pandaToken.trim() || watchConfig.footballToken.trim()
   );
+
+  // Explicación específica cuando el filtro de deporte activo no tiene fuente de
+  // datos sin token (p. ej. R6 Siege, LoL, CS2 o Dota 2 sin clave de PandaScore).
+  // Valorant siempre tiene el directo de VLR y el fútbol cae en el aviso genérico.
+  const tokenHintForSport = (() => {
+    if (sportFilter === 'TODOS') return null;
+    if (sportFilter === 'FÚTBOL') {
+      return watchConfig.footballToken.trim()
+        ? null
+        : 'El filtro Fútbol necesita tu token de Football-Data: configúralo en la pestaña APIs para ver partidos de fútbol.';
+    }
+    if (sportFilter === 'VALORANT') return null;
+    return watchConfig.pandaToken.trim()
+      ? null
+      : `El filtro ${sportFilter} necesita tu token de PandaScore: sin él no hay fuente de datos para este juego.`;
+  })();
 
   // Auto-reset del filtro de deporte si el seleccionado queda desactivado
   useEffect(() => {
@@ -461,10 +525,137 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     configRef.current = watchConfig;
   }, [watchConfig]);
 
+  /** Reconciliación de recordatorios programados (solo nativo, app cerrada OK). */
+  const reconcileNativeReminders = useCallback(
+    async (
+      data: Match[],
+      settings: NotificationSettings,
+      resolvePrefs: (m: Match) => { relevant: boolean; prefs: NotificationEventPrefs }
+    ) => {
+      if (Platform.OS === 'web') return;
+      const perm = await AppNotifications.getPermission();
+      if (perm !== 'granted') return;
+
+      const now = Date.now();
+      const dayAhead = 24 * 60 * 60 * 1000;
+      const eligible = new Map<string, { date: Date; title: string; body: string }>();
+      for (const m of data) {
+        if (m.status !== 'UPCOMING') continue;
+        const start = new Date(m.startTimeIso).getTime();
+        if (isNaN(start)) continue;
+        const remindAt = start - settings.reminderMinutes * 60_000;
+        if (remindAt <= now || remindAt - now > dayAhead) continue; // solo próximas 24 h
+        const { relevant, prefs } = resolvePrefs(m);
+        if (!relevant || !prefs.reminder) continue;
+        const shortA = m.teamA.shortName || m.teamA.name;
+        const shortB = m.teamB.shortName || m.teamB.name;
+        eligible.set(`reminder-${m.id}-${remindAt}`, {
+          date: new Date(remindAt),
+          title: `En ${settings.reminderMinutes} min: ${shortA} vs ${shortB}`,
+          body: m.league,
+        });
+      }
+
+      const scheduled = await AppNotifications.getScheduledIdentifiers();
+      for (const id of scheduled.filter((i) => i.startsWith('reminder-'))) {
+        if (!eligible.has(id)) await AppNotifications.cancelScheduled(id);
+      }
+      for (const [id, info] of eligible) {
+        if (!scheduled.includes(id)) {
+          await AppNotifications.scheduleAt(id, info.date, info.title, info.body);
+        }
+      }
+    },
+    []
+  );
+
+  /**
+   * Motor de alertas: compara cada partido con su estado anterior y entrega los
+   * eventos según la matriz de preferencias (general → torneo → equipo). Con las
+   * notificaciones apagadas mantiene el aviso in-app de "nuevo directo".
+   */
+  const processMatchNotifications = useCallback(
+    async (data: Match[]) => {
+      const cfg = configRef.current;
+      const settings = cfg.notifications ?? DEFAULT_NOTIFICATION_SETTINGS;
+
+      // Fase 2: con el push conectado, el servidor es el único que envía avisos
+      // (incluso con la app cerrada); la app no duplica. Al desconectar, el motor
+      // local se reinicia en "primera carga" para no soltar eventos atrasados.
+      const pushConnected =
+        Platform.OS !== 'web' && Boolean(settings.push?.connected && settings.push?.serverUrl);
+      if (pushConnected) {
+        notifEngineReadyRef.current = false;
+        return;
+      }
+
+      const firstRun = !notifEngineReadyRef.current;
+      const resolvePrefs = createMatchPrefsResolver(
+        settings,
+        cfg.favoriteTeams,
+        cfg.favoriteTournaments
+      );
+
+      if (!firstRun) {
+        for (const m of data) {
+          const prev = matchSnapshotsRef.current.get(m.id);
+          const { relevant, prefs } = resolvePrefs(m);
+          if (!relevant) continue;
+          const effectivePrefs: NotificationEventPrefs = settings.enabled
+            ? prefs
+            : {
+                kickoff: true,
+                goal: false,
+                halfTime: false,
+                fullTime: false,
+                mapEnd: false,
+                seriesEnd: false,
+                reminder: false,
+              };
+          for (const ev of diffMatchEvents(m, prev, effectivePrefs)) {
+            if (notifiedEventsRef.current.has(ev.dedupeKey)) continue;
+            notifiedEventsRef.current.add(ev.dedupeKey);
+            if (settings.enabled) {
+              const delivered = await AppNotifications.notify(ev.title, ev.body, ev.dedupeKey);
+              if (!delivered) showToast(ev.title);
+            } else {
+              showToast(`${ev.title} · ${ev.body}`);
+            }
+          }
+        }
+      }
+      for (const m of data) matchSnapshotsRef.current.set(m.id, toMatchSnapshot(m));
+
+      // Recordatorios: en web se detectan al vuelo; en nativo se programan en el sistema.
+      if (settings.enabled) {
+        if (Platform.OS === 'web') {
+          const reminders = findUpcomingReminders(
+            data,
+            settings,
+            new Date(),
+            remindedEventsRef.current,
+            resolvePrefs
+          );
+          for (const r of reminders) {
+            remindedEventsRef.current.add(r.dedupeKey);
+            const delivered = await AppNotifications.notify(r.title, r.body, r.dedupeKey);
+            if (!delivered) showToast(r.title);
+          }
+        } else {
+          await reconcileNativeReminders(data, settings, resolvePrefs);
+        }
+      }
+
+      notifEngineReadyRef.current = true;
+    },
+    [showToast, reconcileNativeReminders]
+  );
+
   // Fetch matches
   const loadMatches = useCallback(async (forceRefresh = false, configOverride?: Gtr3ConfigState) => {
     const cfg = configOverride ?? configRef.current;
     const requestSeq = ++requestSeqRef.current;
+    lastLoadStartRef.current = Date.now();
     try {
       const { matches: data, sources } = await ScoreService.fetchAllMatchesWithStatus({
         pandaToken: cfg.pandaToken,
@@ -481,6 +672,10 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
       setLastUpdatedAt(lastLoadAtRef.current);
       setSourceStatus(sources);
       setMatches(data);
+
+      // Motor de alertas: eventos (inicio, gol, descanso, final, mapa, serie) y
+      // recordatorios, con la matriz de preferencias por favorito.
+      processMatchNotifications(data);
     } catch (err) {
       if (requestSeq !== requestSeqRef.current) return;
       console.warn('Error loading matches:', err);
@@ -490,7 +685,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
         setRefreshing(false);
       }
     }
-  }, []);
+  }, [processMatchNotifications]);
 
   // Clave estable de lo que sí afecta a los partidos (favoritos y juegos activos).
   // Los tokens quedan fuera a propósito: se aplican al guardar y no al teclear.
@@ -529,6 +724,52 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     });
     return () => subscription.remove();
   }, [loadMatches]);
+
+  // Mantiene el flag de "hay directos" para que el auto-refresco elija el ritmo.
+  useEffect(() => {
+    hasLiveRef.current = matches.some((m) => m.status === 'LIVE');
+  }, [matches]);
+
+  // Auto-refresco inteligente: cada 30 s comprueba si toca recargar. Con partidos
+  // en directo refresca ~cada 75 s; sin ellos, cada 3 minutos. Se salta si la app
+  // está en segundo plano o si acaba de lanzarse una carga.
+  useEffect(() => {
+    if (!configReady) return;
+    const AUTO_REFRESH_LIVE_MS = 75_000;
+    const AUTO_REFRESH_IDLE_MS = 180_000;
+    const timer = setInterval(() => {
+      if (appStateRef.current !== 'active') return;
+      const elapsed = Date.now() - lastLoadStartRef.current;
+      const threshold = hasLiveRef.current ? AUTO_REFRESH_LIVE_MS : AUTO_REFRESH_IDLE_MS;
+      if (elapsed >= threshold) loadMatches();
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, [configReady, loadMatches]);
+
+  // Fase 2: con el push conectado, sube la configuración al servidor (tokens,
+  // favoritos y matriz de eventos) con un pequeño debounce ante cambios.
+  const pushSyncKey = JSON.stringify({
+    push: watchConfig.notifications?.push ?? null,
+    enabled: watchConfig.notifications?.enabled ?? false,
+    events: watchConfig.notifications?.events ?? null,
+    teams: watchConfig.notifications?.teams ?? null,
+    tournaments: watchConfig.notifications?.tournaments ?? null,
+    reminderMinutes: watchConfig.notifications?.reminderMinutes ?? null,
+    pandaToken: watchConfig.pandaToken,
+    footballToken: watchConfig.footballToken,
+    favoriteTeams: watchConfig.favoriteTeams,
+    favoriteTournaments: watchConfig.favoriteTournaments,
+  });
+  useEffect(() => {
+    if (!configReady) return;
+    const push = configRef.current.notifications?.push;
+    if (!push?.connected || !push.serverUrl || !push.authKey) return;
+    if (Platform.OS === 'web') return;
+    const timer = setTimeout(() => {
+      PushService.pushConfig(configRef.current).catch(() => {});
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [configReady, pushSyncKey]);
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
@@ -803,15 +1044,44 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     return matchesFav && matchesSport && matchesTier && matchesRegion && matchesQuery;
   }, [watchConfig.enabledGames, sportFilter, tierFilter, regionFilter, searchQuery]);
 
+  // Días con partidos próximos (para la tira semanal de la página "Próximos").
+  // Se calculan sobre todos los próximos filtrados; el filtro de día se aplica después.
+  const upcomingDays = React.useMemo(() => {
+    const map = new Map<string, { key: string; date: Date; count: number }>();
+    matches
+      .filter(matchesActiveFilters)
+      .filter((m) => m.status === 'UPCOMING')
+      .forEach((m) => {
+        const d = new Date(m.startTimeIso);
+        if (isNaN(d.getTime())) return;
+        const key = localDayKey(d);
+        const entry = map.get(key);
+        if (entry) entry.count += 1;
+        else map.set(key, { key, date: d, count: 1 });
+      });
+    return [...map.values()].sort((a, b) => a.date.getTime() - b.date.getTime());
+  }, [matches, matchesActiveFilters]);
+
+  // Si el día filtrado desaparece de los datos (p. ej. tras un refresco), se ignora.
+  const effectiveWeekDayFilter =
+    weekDayFilter && upcomingDays.some((d) => d.key === weekDayFilter) ? weekDayFilter : null;
+
   // Partidos ya filtrados, agrupados por estado del partido
   const matchesByStatus = React.useMemo<Record<MatchStatus, Match[]>>(() => {
     const base = matches.filter(matchesActiveFilters);
+    const upcoming = base.filter((m) => m.status === 'UPCOMING');
+    const filteredUpcoming = effectiveWeekDayFilter
+      ? upcoming.filter((m) => {
+          const d = new Date(m.startTimeIso);
+          return !isNaN(d.getTime()) && localDayKey(d) === effectiveWeekDayFilter;
+        })
+      : upcoming;
     return {
       LIVE: base.filter((m) => m.status === 'LIVE'),
-      UPCOMING: base.filter((m) => m.status === 'UPCOMING'),
+      UPCOMING: filteredUpcoming,
       FINISHED: base.filter((m) => m.status === 'FINISHED'),
     };
-  }, [matches, matchesActiveFilters]);
+  }, [matches, matchesActiveFilters, effectiveWeekDayFilter]);
 
   // Secciones de cada página (favoritos + grupos por torneo) memoizadas: mantienen
   // la identidad de sus arrays entre renders, de modo que los MatchGroup
@@ -946,6 +1216,22 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
           <HtzButton
             variant="secondary"
             size="sm"
+            onPress={() => setNotificationsModalVisible(true)}
+            accessibilityLabel="Configurar alertas"
+            icon={
+              <Bell
+                size={15}
+                color={
+                  watchConfig.notifications?.enabled
+                    ? htzTokens.colors.primary
+                    : htzTokens.colors.onSurface
+                }
+              />
+            }
+          />
+          <HtzButton
+            variant="secondary"
+            size="sm"
             onPress={onRefresh}
             disabled={refreshing}
             accessibilityLabel="Actualizar partidos"
@@ -971,49 +1257,14 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
           ]}
         >
           <View style={styles.mainScoresContainer}>
-          {/* Indicador de frescura: última actualización + estado de fuentes */}
-          {lastUpdatedAt > 0 && (
-            <View style={styles.updateStatusBar}>
-              <Text style={styles.updateStatusText}>
-                {refreshing ? 'Actualizando…' : `Actualizado ${formatRelativeTime(lastUpdatedAt)}`}
-              </Text>
-              <View style={styles.sourceStatusList}>
-                {sourceStatus.map((s) => (
-                  <View
-                    key={s.id}
-                    style={styles.sourceStatusItem}
-                    accessibilityLabel={`${s.label}: ${describeSource(s)}`}
-                  >
-                    <View
-                      style={[
-                        styles.sourceDot,
-                        s.state === 'ok'
-                          ? styles.sourceDotOk
-                          : s.state === 'error'
-                          ? styles.sourceDotError
-                          : styles.sourceDotSkipped,
-                      ]}
-                    />
-                    <Text
-                      style={[
-                        styles.sourceStatusLabel,
-                        s.state === 'skipped' && styles.sourceStatusLabelMuted,
-                      ]}
-                    >
-                      {s.label}
-                    </Text>
-                  </View>
-                ))}
-              </View>
-            </View>
-          )}
-
-          {/* Panel plegable: filtros de deporte, nivel y región */}
+          {/* Panel plegable: filtros de deporte, nivel y región. Su fila de título
+              integra también la frescura ("hace X" + puntos de fuentes). */}
           <View style={styles.filtersPanel}>
             <TouchableOpacity
               style={styles.filtersPanelHeader}
               onPress={() => setFiltersPanelOpen((open) => !open)}
               activeOpacity={0.7}
+              hitSlop={{ top: 4, bottom: 4, left: 0, right: 0 }}
             >
               <SlidersHorizontal size={14} color={htzTokens.colors.primary} />
               <Text style={styles.filtersPanelTitle}>Deportes y filtros</Text>
@@ -1022,6 +1273,37 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
                   <Text style={styles.filterCountText}>{activeFiltersCount}</Text>
                 </View>
               )}
+
+              {/* Frescura compacta: "hace X" + estado de cada fuente (solo puntos;
+                  los nombres quedan en el accessibilityLabel) */}
+              {lastUpdatedAt > 0 && (
+                <View style={styles.freshnessInline}>
+                  <Text style={styles.freshnessText} numberOfLines={1}>
+                    {refreshing ? 'Actualizando…' : formatRelativeTime(lastUpdatedAt)}
+                  </Text>
+                  <View style={styles.sourceStatusList}>
+                    {sourceStatus.map((s) => (
+                      <View
+                        key={s.id}
+                        style={styles.sourceStatusItem}
+                        accessibilityLabel={`${s.label}: ${describeSource(s)}`}
+                      >
+                        <View
+                          style={[
+                            styles.sourceDot,
+                            s.state === 'ok'
+                              ? styles.sourceDotOk
+                              : s.state === 'error'
+                              ? styles.sourceDotError
+                              : styles.sourceDotSkipped,
+                          ]}
+                        />
+                      </View>
+                    ))}
+                  </View>
+                </View>
+              )}
+
               {filtersPanelOpen ? (
                 <ChevronUp size={16} color={htzTokens.colors.outline} />
               ) : (
@@ -1130,6 +1412,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
                 style={styles.swipeHint}
                 onPress={() => handleSelectStatusTab(leftPage)}
                 activeOpacity={0.7}
+                hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
               >
                 <ChevronLeft size={13} color={htzTokens.colors.outline} />
                 <Text style={styles.swipeHintText}>{STATUS_TAB_LABELS[leftPage]}</Text>
@@ -1143,6 +1426,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
                 style={styles.swipeHint}
                 onPress={() => handleSelectStatusTab(rightPage)}
                 activeOpacity={0.7}
+                hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
               >
                 <Text style={styles.swipeHintText}>{STATUS_TAB_LABELS[rightPage]}</Text>
                 <ChevronRight size={13} color={htzTokens.colors.outline} />
@@ -1210,6 +1494,63 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
                       >
                         {pageMatches.length > 0 ? (
                           <>
+                            {/* Tira semanal (solo en Próximos y si hay más de un día).
+                                Estilo ligero: texto + subrayado del día activo. */}
+                            {st === 'UPCOMING' && upcomingDays.length >= 2 && (
+                              <View style={styles.weekStripWrap}>
+                                <ScrollView
+                                  horizontal
+                                  showsHorizontalScrollIndicator={false}
+                                  contentContainerStyle={styles.weekStrip}
+                                >
+                                  <TouchableOpacity
+                                    style={styles.weekDayBtn}
+                                    onPress={() => setWeekDayFilter(null)}
+                                    activeOpacity={0.7}
+                                    hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+                                    accessibilityRole="button"
+                                    accessibilityLabel="Ver todos los próximos partidos"
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.weekDayText,
+                                        !effectiveWeekDayFilter && styles.weekDayTextActive,
+                                      ]}
+                                    >
+                                      Todos
+                                    </Text>
+                                    {!effectiveWeekDayFilter ? (
+                                      <View style={styles.weekDayUnderline} />
+                                    ) : null}
+                                  </TouchableOpacity>
+                                  {upcomingDays.map((d) => {
+                                    const selected = effectiveWeekDayFilter === d.key;
+                                    return (
+                                      <TouchableOpacity
+                                        key={d.key}
+                                        style={styles.weekDayBtn}
+                                        onPress={() => setWeekDayFilter(d.key)}
+                                        activeOpacity={0.7}
+                                        hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+                                        accessibilityRole="button"
+                                        accessibilityLabel={`${dayChipLabel(d.date)}: ${d.count} partidos`}
+                                      >
+                                        <Text
+                                          style={[
+                                            styles.weekDayText,
+                                            selected && styles.weekDayTextActive,
+                                          ]}
+                                        >
+                                          {dayChipLabel(d.date)}
+                                          <Text style={styles.weekDayCount}> {d.count}</Text>
+                                        </Text>
+                                        {selected ? <View style={styles.weekDayUnderline} /> : null}
+                                      </TouchableOpacity>
+                                    );
+                                  })}
+                                </ScrollView>
+                              </View>
+                            )}
                             {pageSections.favorite.length > 0 && (
                               <MemoMatchGroup
                                 key="__favorite_teams__"
@@ -1234,12 +1575,14 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
                             <Text style={styles.emptySubtitle}>
                               {STATUS_EMPTY_SUBTITLES[st]}
                             </Text>
-                            {!hasAnyApiToken && (
+                            {tokenHintForSport ? (
+                              <Text style={styles.emptyHint}>{tokenHintForSport}</Text>
+                            ) : !hasAnyApiToken ? (
                               <Text style={styles.emptyHint}>
                                 Configura tus tokens de API (PandaScore / Football-Data) para ver
                                 también partidos en línea de tus favoritos.
                               </Text>
-                            )}
+                            ) : null}
                             <View style={styles.emptyActionsRow}>
                               {(tierFilter !== 'TODOS' ||
                                 regionFilter !== 'TODOS' ||
@@ -1620,6 +1963,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
           visible={!!selectedMatch}
           onClose={() => setSelectedMatch(null)}
           pandaToken={watchConfig.pandaToken}
+          footballToken={watchConfig.footballToken}
           onSelectTournament={handleOpenTournamentByLeague}
         />
       )}
@@ -1631,6 +1975,16 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
         enabledGames={watchConfig.enabledGames}
         onToggleGame={handleToggleGame}
         onSetPreset={handleSetGamePreset}
+      />
+
+      {/* Alertas (notificaciones) */}
+      <NotificationsModal
+        key={notificationsModalVisible ? 'alerts-open' : 'alerts-closed'}
+        visible={notificationsModalVisible}
+        onClose={() => setNotificationsModalVisible(false)}
+        config={watchConfig}
+        onUpdateConfig={handleUpdateConfig}
+        onNotify={showToast}
       />
 
       {/* Competition Filters Modal */}
@@ -1686,7 +2040,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
     paddingHorizontal: 16,
-    height: 34,
+    height: 38,
   },
   filtersPanelTitle: {
     flex: 1,
@@ -1700,13 +2054,14 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 18,
-    minHeight: 22,
+    minHeight: 26,
     marginBottom: 6,
   },
   swipeHint: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 2,
+    paddingVertical: 3,
   },
   swipeHintText: {
     fontSize: 11,
@@ -1813,29 +2168,25 @@ const styles = StyleSheet.create({
   tabPaneHidden: {
     display: 'none',
   },
-  updateStatusBar: {
+  freshnessInline: {
     flexDirection: 'row',
     alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 10,
-    paddingHorizontal: 16,
-    paddingTop: 6,
+    gap: 8,
+    flexShrink: 0,
   },
-  updateStatusText: {
+  freshnessText: {
     color: htzTokens.colors.outline,
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '600',
   },
   sourceStatusList: {
     flexDirection: 'row',
     alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 10,
+    gap: 6,
   },
   sourceStatusItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
   },
   sourceDot: {
     width: 7,
@@ -1851,14 +2202,35 @@ const styles = StyleSheet.create({
   sourceDotSkipped: {
     backgroundColor: 'rgba(255, 255, 255, 0.25)',
   },
-  sourceStatusLabel: {
-    color: htzTokens.colors.onSurfaceVariant,
-    fontSize: 10,
+  weekStripWrap: {
+    marginBottom: 8,
+  },
+  weekStrip: {
+    gap: 14,
+    paddingHorizontal: 2,
+    paddingBottom: 2,
+  },
+  weekDayBtn: {
+    paddingVertical: 6,
+  },
+  weekDayText: {
+    color: htzTokens.colors.outline,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  weekDayTextActive: {
+    color: htzTokens.colors.primary,
+  },
+  weekDayCount: {
+    color: htzTokens.colors.outline,
+    fontSize: 9,
     fontWeight: '600',
   },
-  sourceStatusLabelMuted: {
-    color: htzTokens.colors.outline,
-    opacity: 0.7,
+  weekDayUnderline: {
+    marginTop: 3,
+    height: 2,
+    borderRadius: 1,
+    backgroundColor: htzTokens.colors.primary,
   },
   liveNoticeBar: {
     flexDirection: 'row',

@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "987417751639",
+    "project_id": "htz-scoreviewer",
+    "storage_bucket": "htz-scoreviewer.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:987417751639:android:a5bc7b18c8162fd66a3312",
+        "android_client_info": {
+          "package_name": "com.haritz.scoreviewer"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDs7LiRUYXj6MJOI1rhtR4Rq3E0oGfCOCw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:987417751639:android:5bed31ddf1b4c3626a3312",
+        "android_client_info": {
+          "package_name": "com.htz.scoreviewer"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDs7LiRUYXj6MJOI1rhtR4Rq3E0oGfCOCw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

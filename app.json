@@ -13,6 +13,7 @@
     "android": {
       "package": "com.haritz.scoreviewer",
       "versionCode": 9,
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#1E2420",
         "foregroundImage": "./assets/android-icon-foreground.png",

@@ -445,6 +445,19 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
           </View>
         </HtzCard>
 
+        {/* Aviso de contenido de ejemplo: sin datos sincronizados de las APIs, el
+            cuadro/clasificación/partidos pueden ser una proyección estática del
+            catálogo y no coincidir con la realidad. */}
+        {detail.dataSource === 'seed' && (
+          <View style={styles.seedBanner}>
+            <Info size={14} color={htzTokens.colors.outline} />
+            <Text style={styles.seedBannerText}>
+              Datos de ejemplo: el cuadro, la clasificación y los partidos pueden no
+              coincidir con la realidad. Configura tus APIs para datos oficiales.
+            </Text>
+          </View>
+        )}
+
         {/* SUB-TABS NAVIGATION */}
         <View style={styles.tabsWrapper}>
           <HtzTabs
@@ -632,6 +645,7 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
           visible={!!selectedMatch}
           onClose={() => setSelectedMatch(null)}
           pandaToken={pandaToken}
+          footballToken={footballToken}
         />
       )}
     </View>
@@ -816,6 +830,23 @@ const styles = StyleSheet.create({
   },
   tabsWrapper: {
     marginBottom: 14,
+  },
+  seedBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    padding: 10,
+    marginBottom: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+  },
+  seedBannerText: {
+    flex: 1,
+    color: htzTokens.colors.outline,
+    fontSize: 11,
+    lineHeight: 16,
   },
   matchesTabContainer: {
     paddingVertical: 4,

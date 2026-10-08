@@ -28,9 +28,11 @@ import {
 } from 'lucide-react-native';
 import { Match, SportCategory } from '../services/types';
 import { formatMatchSchedule } from '../services/dateUtils';
+import { getDefaultStreams } from '../services/scoreService';
 import { VlrScoreboardView } from './VlrScoreboardView';
 import { R6ScoreboardView } from './R6ScoreboardView';
 import { LolPicksBansView } from './LolPicksBansView';
+import { MatchPreviewSection } from './MatchPreviewSection';
 import { GameLogo } from './GameLogo';
 import { MarqueeText } from './MarqueeText';
 import {
@@ -46,6 +48,7 @@ interface MatchDetailModalProps {
   visible: boolean;
   onClose: () => void;
   pandaToken?: string;
+  footballToken?: string;
   onSelectTournament?: (
     leagueName: string,
     game?: SportCategory,
@@ -69,6 +72,7 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
   visible,
   onClose,
   pandaToken,
+  footballToken,
   onSelectTournament,
 }) => {
   const [activeTab, setActiveTab] = useState<string>(defaultTabForGame(match?.game));
@@ -127,8 +131,20 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
     },
   ];
 
-  const mainStream =
-    match.details?.streams?.find((s) => s.official) || match.details?.streams?.[0];
+  // Canales del partido. Si la fuente no trae retransmisiones (p. ej. fútbol de
+  // Football-Data), se usan los canales oficiales por defecto del juego/liga solo
+  // mientras el partido está en directo o por jugar (en finalizados sería ruido).
+  const streams =
+    match.details?.streams && match.details.streams.length > 0
+      ? match.details.streams
+      : match.status === 'LIVE' || match.status === 'UPCOMING'
+      ? getDefaultStreams(match.game, match.league)
+      : [];
+
+  const mainStream = streams.find((s) => s.official) || streams[0];
+
+  // Canales adicionales para la tarjeta "Dónde verlo" (máx. 3, sin repetir el principal).
+  const otherStreams = streams.filter((s) => s !== mainStream).slice(0, 3);
 
   const openUrl = (url?: string) => {
     if (url) {
@@ -371,6 +387,14 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
                   )}
                 </HtzCard>
 
+                {/* Previa: forma reciente + cara a cara (solo si hay fuente aplicable) */}
+                <MatchPreviewSection
+                  key={match.id}
+                  match={match}
+                  pandaToken={pandaToken}
+                  footballToken={footballToken}
+                />
+
                 {/* Retransmisión principal */}
                 {mainStream || (match.details?.broadcastTv && match.details.broadcastTv.length > 0) ? (
                   <View style={{ marginTop: 16 }}>
@@ -395,10 +419,38 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
                         <TouchableOpacity
                           style={styles.openStreamBtn}
                           onPress={() => openUrl(mainStream.rawUrl || mainStream.embedUrl)}
+                          accessibilityRole="button"
+                          accessibilityLabel={`Abrir retransmisión principal: ${mainStream.name}`}
                         >
                           <Text style={styles.openStreamText}>Ver en directo</Text>
                           <ExternalLink size={14} color={htzTokens.colors.primary} />
                         </TouchableOpacity>
+                      )}
+
+                      {/* Canales alternativos (Twitch/YouTube/TV) */}
+                      {otherStreams.length > 0 && (
+                        <View style={styles.otherStreamsWrap}>
+                          {otherStreams.map((s, sIdx) => (
+                            <TouchableOpacity
+                              key={`stream-${sIdx}`}
+                              style={styles.otherStreamRow}
+                              onPress={() => openUrl(s.rawUrl || s.embedUrl)}
+                              accessibilityRole="button"
+                              accessibilityLabel={`Abrir canal ${s.name}`}
+                            >
+                              <Tv size={13} color={htzTokens.colors.secondary} />
+                              <Text style={styles.otherStreamName} numberOfLines={1}>
+                                {s.name}
+                              </Text>
+                              {s.language ? (
+                                <Text style={styles.otherStreamLang}>
+                                  {s.language.toUpperCase()}
+                                </Text>
+                              ) : null}
+                              <ExternalLink size={12} color={htzTokens.colors.outline} />
+                            </TouchableOpacity>
+                          ))}
+                        </View>
                       )}
                     </HtzCard>
                   </View>
@@ -1302,6 +1354,32 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
   openStreamText: {
     color: htzTokens.colors.primary,
     fontSize: 12,
+    fontWeight: '700',
+  },
+  otherStreamsWrap: {
+    marginTop: 10,
+    gap: 6,
+  },
+  otherStreamRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 7,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  otherStreamName: {
+    flex: 1,
+    color: htzTokens.colors.onSurfaceVariant,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  otherStreamLang: {
+    color: htzTokens.colors.outline,
+    fontSize: 10,
     fontWeight: '700',
   },
   legalNotice: {

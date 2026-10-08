@@ -167,7 +167,7 @@ const SwissTeamRow: React.FC<{ team: BracketMatchTeam; won: boolean }> = ({ team
     </View>
     <View style={[styles.scoreBadge, won && styles.scoreBadgeWinner]}>
       <Text style={[styles.scoreText, won && styles.scoreTextWinner]}>
-        {team.score !== undefined ? team.score : '-'}
+        {team.score !== undefined ? team.score : '–'}
       </Text>
     </View>
   </View>

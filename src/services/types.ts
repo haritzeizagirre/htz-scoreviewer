@@ -24,6 +24,81 @@ export interface MatchSourceStatus {
   reason?: 'no-token' | 'disabled';
 }
 
+/** Resultado de un partido reciente de un equipo (para la forma reciente). */
+export interface TeamFormEntry {
+  dateIso: string;
+  league?: string;
+  opponentName: string;
+  scoreFor: number | string;
+  scoreAgainst: number | string;
+  result: 'W' | 'L' | 'D';
+}
+
+/** Un enfrentamiento anterior entre los dos equipos (para el cara a cara). */
+export interface HeadToHeadEntry {
+  dateIso: string;
+  league?: string;
+  teamA: string;
+  teamB: string;
+  scoreA: number | string;
+  scoreB: number | string;
+}
+
+/** Previa de un partido: forma reciente de ambos equipos + cara a cara. */
+export interface MatchPreviewData {
+  formA: TeamFormEntry[];
+  formB: TeamFormEntry[];
+  h2h: HeadToHeadEntry[];
+}
+
+/** Tipos de evento notificables. */
+export type NotificationEventKey =
+  | 'kickoff' // Inicio (fútbol y esports)
+  | 'goal' // Gol (fútbol)
+  | 'halfTime' // Descanso (fútbol)
+  | 'fullTime' // Final del partido (fútbol)
+  | 'mapEnd' // Fin de mapa/juego (esports)
+  | 'seriesEnd' // Resultado final de serie (esports)
+  | 'reminder'; // Recordatorio previo
+
+/** Interruptores por tipo de evento (matriz global o por favorito). */
+export interface NotificationEventPrefs {
+  kickoff: boolean;
+  goal: boolean;
+  halfTime: boolean;
+  fullTime: boolean;
+  mapEnd: boolean;
+  seriesEnd: boolean;
+  reminder: boolean;
+}
+
+/** Configuración del push con la app cerrada (Fase 2, servidor propio). */
+export interface PushSettings {
+  /** URL del worker desplegado (p. ej. https://score-viewer-push.xxx.workers.dev). */
+  serverUrl: string;
+  /** Clave compartida con el servidor (AUTH_KEY de wrangler.toml). */
+  authKey: string;
+  /** Conectado: el servidor envía los avisos (la app delega en él). */
+  connected: boolean;
+  /** Token Expo Push de este dispositivo. */
+  deviceToken?: string;
+}
+
+/**
+ * Configuración de alertas: valores generales + matriz por favorito.
+ * Las claves de equipos son el nombre normalizado y las de torneos el id maestro
+ * (o `dyn:<nombre>` para torneos dinámicos de la búsqueda online).
+ */
+export interface NotificationSettings {
+  enabled: boolean;
+  events: NotificationEventPrefs;
+  teams: Record<string, Partial<NotificationEventPrefs>>;
+  tournaments: Record<string, Partial<NotificationEventPrefs>>;
+  reminderMinutes: number;
+  /** Fase 2: push con la app cerrada (solo Android). */
+  push?: PushSettings;
+}
+
 export interface PlayerInfo {
   id?: string | number;
   name: string;
@@ -152,6 +227,8 @@ export interface Gtr3ConfigState {
   showFavoriteRecentResults: boolean;
   showTeamLogos: boolean;
   maxMatches: number;
+  /** Configuración de alertas (notificaciones) de la app. */
+  notifications?: NotificationSettings;
 }
 
 export interface TournamentItem {
@@ -419,6 +496,8 @@ export interface TournamentFullDetail {
   tier: TournamentTier;
   region: MatchRegion;
   format: TournamentFormat;
+  /** 'seed' = contenido de ejemplo del catálogo; 'live' = sincronizado con APIs. */
+  dataSource?: 'seed' | 'live';
   season?: string;
   dates?: string;
   location?: string;

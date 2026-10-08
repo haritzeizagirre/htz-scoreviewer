@@ -2078,6 +2078,7 @@ export const TournamentService = {
     if (MASTER_SEEDS[tournament.id]) {
       const seed = JSON.parse(JSON.stringify(MASTER_SEEDS[tournament.id]));
       if (tournament.season) seed.season = tournament.season;
+      seed.dataSource = 'seed';
       return seed;
     }
 
@@ -2091,6 +2092,7 @@ export const TournamentService = {
       tier: tournament.tier,
       region: tournament.region,
       format: isLeague ? 'LEAGUE' : 'PLAYOFFS',
+      dataSource: 'seed',
       season: tournament.season || (tournament.game === 'FÚTBOL' ? '2025/2026' : String(new Date().getFullYear())),
       description: tournament.description || `Competición oficial de ${tournament.game}`,
       participants: [],
@@ -2162,6 +2164,9 @@ export const TournamentService = {
             baseDetail = {
               ...baseDetail,
               ...parsed,
+              // La caché real conserva su origen ('live'); sin marca (entradas
+              // antiguas o semilla) se mantiene el valor de la semilla.
+              dataSource: parsed.dataSource ?? baseDetail.dataSource,
               bracket: parsed.bracket || baseDetail.bracket,
               standings: (parsed.standings && parsed.standings.length > 0) ? parsed.standings : baseDetail.standings,
               stages: (parsed.stages && parsed.stages.length > 0) ? parsed.stages : baseDetail.stages,
@@ -2209,6 +2214,7 @@ export const TournamentService = {
             const e = new Date(pandaData.resolvedSeries.endAt);
             baseDetail.dates = `${b.toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })} - ${e.toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' })}`;
           }
+          baseDetail.dataSource = 'live';
           hasLoadedLiveMatches = true;
         }
       } catch (err) {
@@ -2222,6 +2228,7 @@ export const TournamentService = {
         const matches = await ScoreService.fetchMatchesForTournament(effectiveTournament, tokens);
         if (matches && matches.length > 0) {
           baseDetail.matches = matches;
+          baseDetail.dataSource = 'live';
           if (!baseDetail.bracket) {
             baseDetail.bracket = buildBracketFromMatches(matches);
           }
