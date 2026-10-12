@@ -2,7 +2,7 @@
   "expo": {
     "name": "Score Viewer Pro",
     "slug": "score-viewer",
-    "version": "2.0.10",
+    "version": "2.0.11",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "scoreviewer",
@@ -12,7 +12,7 @@
     },
     "android": {
       "package": "com.haritz.scoreviewer",
-      "versionCode": 11,
+      "versionCode": 12,
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#1E2420",
