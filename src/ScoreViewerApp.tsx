@@ -49,6 +49,7 @@ import {
   TournamentItem,
   TeamCatalogItem,
   MatchSourceStatus,
+  MatchGoal,
   NotificationEventPrefs,
   NotificationSettings,
 } from './services/types';
@@ -263,6 +264,8 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   const notifiedEventsRef = useRef<Set<string>>(new Set());
   const remindedEventsRef = useRef<Set<string>>(new Set());
   const notifEngineReadyRef = useRef(false);
+  // Goles reales por partido+marcador ("id:1-0") para no pedirlos dos veces.
+  const footballGoalsCacheRef = useRef<Map<string, MatchGoal[]>>(new Map());
   const [selectedMatch, setSelectedMatch] = useState<Match | null>(null);
   const [selectedTournament, setSelectedTournament] = useState<TournamentItem | null>(null);
 
@@ -344,6 +347,11 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   useEffect(() => {
     const timer = setInterval(() => setClockTick((v) => v + 1), 30_000);
     return () => clearInterval(timer);
+  }, []);
+
+  // Android: crea los canales por deporte al arrancar (agnóstico del primer aviso).
+  useEffect(() => {
+    AppNotifications.ensureChannels().catch(() => {});
   }, []);
 
   // Modales
@@ -525,6 +533,57 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     configRef.current = watchConfig;
   }, [watchConfig]);
 
+  /**
+   * Goles reales de fútbol: consulta `/v4/matches/{id}` solo cuando el marcador
+   * acaba de cambiar y el partido interesa para alertas. Así el aviso de gol dice
+   * quién marcó y en qué minuto. Se cachea por marcador y se limita por pasada.
+   */
+  const enrichFootballGoals = useCallback(
+    async (
+      data: Match[],
+      token: string,
+      resolvePrefs: (m: Match) => { relevant: boolean; prefs: NotificationEventPrefs }
+    ) => {
+      const cleanToken = (token || '').trim();
+      if (!cleanToken) return;
+
+      const candidates: Match[] = [];
+      for (const m of data) {
+        if (m.game !== 'FÚTBOL' || m.status !== 'LIVE') continue;
+        const prev = matchSnapshotsRef.current.get(m.id);
+        if (!prev) continue;
+        const changed = `${prev.scoreA}-${prev.scoreB}` !== `${m.teamA.score}-${m.teamB.score}`;
+        if (!changed) continue;
+        const { relevant, prefs } = resolvePrefs(m);
+        if (!relevant || !prefs.goal) continue;
+        candidates.push(m);
+      }
+      if (candidates.length === 0) return;
+
+      await Promise.all(
+        candidates.slice(0, 6).map(async (m) => {
+          const scoreKey = `${m.id}:${m.teamA.score}-${m.teamB.score}`;
+          let goals = footballGoalsCacheRef.current.get(scoreKey);
+          if (goals === undefined) {
+            const rawId = m.id.replace(/^foot-/, '');
+            const fetched = await ScoreService.fetchFootballMatchGoals(rawId, cleanToken);
+            if (fetched === null) return; // fallo puntual: se reintenta en la siguiente pasada
+            goals = fetched;
+            footballGoalsCacheRef.current.set(scoreKey, goals);
+            if (footballGoalsCacheRef.current.size > 200) {
+              const oldest = footballGoalsCacheRef.current.keys().next().value;
+              if (oldest) footballGoalsCacheRef.current.delete(oldest);
+            }
+          }
+          if (goals && goals.length > 0) {
+            m.details = { ...(m.details || {}), goals };
+          }
+        })
+      );
+    },
+    []
+  );
+
   /** Reconciliación de recordatorios programados (solo nativo, app cerrada OK). */
   const reconcileNativeReminders = useCallback(
     async (
@@ -538,7 +597,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
 
       const now = Date.now();
       const dayAhead = 24 * 60 * 60 * 1000;
-      const eligible = new Map<string, { date: Date; title: string; body: string }>();
+      const eligible = new Map<string, { date: Date; title: string; body: string; game: SportCategory }>();
       for (const m of data) {
         if (m.status !== 'UPCOMING') continue;
         const start = new Date(m.startTimeIso).getTime();
@@ -553,6 +612,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
           date: new Date(remindAt),
           title: `En ${settings.reminderMinutes} min: ${shortA} vs ${shortB}`,
           body: m.league,
+          game: m.game,
         });
       }
 
@@ -562,7 +622,9 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
       }
       for (const [id, info] of eligible) {
         if (!scheduled.includes(id)) {
-          await AppNotifications.scheduleAt(id, info.date, info.title, info.body);
+          await AppNotifications.scheduleAt(id, info.date, info.title, info.body, {
+            game: info.game,
+          });
         }
       }
     },
@@ -596,6 +658,12 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
         cfg.favoriteTournaments
       );
 
+      // Goles reales de fútbol: solo se consultan cuando el marcador cambió y el
+      // partido interesa (así el aviso dice quién marcó y en qué minuto).
+      if (!firstRun && settings.enabled) {
+        await enrichFootballGoals(data, cfg.footballToken, resolvePrefs);
+      }
+
       if (!firstRun) {
         for (const m of data) {
           const prev = matchSnapshotsRef.current.get(m.id);
@@ -616,7 +684,9 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
             if (notifiedEventsRef.current.has(ev.dedupeKey)) continue;
             notifiedEventsRef.current.add(ev.dedupeKey);
             if (settings.enabled) {
-              const delivered = await AppNotifications.notify(ev.title, ev.body, ev.dedupeKey);
+              const delivered = await AppNotifications.notify(ev.title, ev.body, ev.dedupeKey, {
+                game: ev.game,
+              });
               if (!delivered) showToast(ev.title);
             } else {
               showToast(`${ev.title} · ${ev.body}`);
@@ -638,7 +708,9 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
           );
           for (const r of reminders) {
             remindedEventsRef.current.add(r.dedupeKey);
-            const delivered = await AppNotifications.notify(r.title, r.body, r.dedupeKey);
+            const delivered = await AppNotifications.notify(r.title, r.body, r.dedupeKey, {
+              game: r.game,
+            });
             if (!delivered) showToast(r.title);
           }
         } else {
@@ -648,7 +720,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
 
       notifEngineReadyRef.current = true;
     },
-    [showToast, reconcileNativeReminders]
+    [showToast, reconcileNativeReminders, enrichFootballGoals]
   );
 
   // Fetch matches
@@ -759,6 +831,9 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     footballToken: watchConfig.footballToken,
     favoriteTeams: watchConfig.favoriteTeams,
     favoriteTournaments: watchConfig.favoriteTournaments,
+    // Los juegos activos filtran también en el servidor: sin esto llegaban
+    // avisos de juegos desactivados (p. ej. CS2).
+    enabledGames: watchConfig.enabledGames,
   });
   useEffect(() => {
     if (!configReady) return;

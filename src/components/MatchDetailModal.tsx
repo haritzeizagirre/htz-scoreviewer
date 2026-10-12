@@ -26,10 +26,10 @@ import {
   BarChart3,
   Info,
 } from 'lucide-react-native';
-import { Match, SportCategory } from '../services/types';
+import { FootballEvent, Match, MatchGoal, SportCategory } from '../services/types';
 import { formatMatchSchedule } from '../services/dateUtils';
 import { getCurrentMapNumber, isLiveRoundScoreFinished } from '../services/matchScoreUtils';
-import { getDefaultStreams } from '../services/scoreService';
+import { getDefaultStreams, ScoreService } from '../services/scoreService';
 import { VlrScoreboardView } from './VlrScoreboardView';
 import { R6ScoreboardView } from './R6ScoreboardView';
 import { LolPicksBansView } from './LolPicksBansView';
@@ -77,6 +77,11 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
   onSelectTournament,
 }) => {
   const [activeTab, setActiveTab] = useState<string>(defaultTabForGame(match?.game));
+  // Goles consultados al abrir la ficha (fútbol): la cronología real se pide una
+  // sola vez por partido y solo si el partido no trae ya goles.
+  const [fetchedGoals, setFetchedGoals] = useState<{ matchId: string; goals: MatchGoal[] } | null>(
+    null
+  );
   // El modal es full-screen y queda fuera del SafeAreaView, así que respetamos
   // el notch/barra de estado manualmente para que el header no se solape.
   const insets = useSafeAreaInsets();
@@ -88,9 +93,57 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
     setActiveTab(defaultTabForGame(match.game));
   }, [match?.id, match?.game]);
 
+  useEffect(() => {
+    if (!match || match.game !== 'FÚTBOL' || !footballToken) return;
+    if (match.details?.goals && match.details.goals.length > 0) return;
+    let cancelled = false;
+    (async () => {
+      const goals = await ScoreService.fetchFootballMatchGoals(
+        match.id.replace(/^foot-/, ''),
+        footballToken
+      );
+      if (!cancelled && goals && goals.length > 0) {
+        setFetchedGoals({ matchId: match.id, goals });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [match?.id, match?.game, footballToken]);
+
   if (!match) return null;
 
   const schedule = formatMatchSchedule(match.startTimeIso, match.status, match.timeInfo);
+
+  // Cronología de fútbol: goles reales (los que traiga el partido o los
+  // consultados al abrir esta ficha); si no hay, los eventos disponibles.
+  const footballGoals: MatchGoal[] =
+    match.details?.goals && match.details.goals.length > 0
+      ? match.details.goals
+      : fetchedGoals && fetchedGoals.matchId === match.id
+      ? fetchedGoals.goals
+      : [];
+  const footballTimeline: FootballEvent[] =
+    match.game === 'FÚTBOL'
+      ? footballGoals.length > 0
+        ? footballGoals.map((g) => ({
+            minute: g.minute,
+            type: 'goal' as const,
+            team: g.team ?? 'A',
+            player: g.scorer || 'Gol',
+            detail: [
+              g.type === 'PENALTY' ? 'Penalti' : g.type === 'OWN_GOAL' ? 'En propia puerta' : undefined,
+              g.injuryTime ? `Min. ${g.minute}+${g.injuryTime}` : undefined,
+              g.assist ? `Asistencia de ${g.assist}` : undefined,
+              typeof g.scoreA === 'number' && typeof g.scoreB === 'number'
+                ? `(${g.scoreA}-${g.scoreB})`
+                : undefined,
+            ]
+              .filter(Boolean)
+              .join(' · '),
+          }))
+        : match.details?.footballEvents ?? []
+      : [];
 
   const tabs: TabItem[] = [
     ...(gameHasStats(match.game)
@@ -470,12 +523,12 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
                   // Timeline de Fútbol
                   <View>
                     <Text style={styles.sectionHeader}>Cronología del Partido</Text>
-                    {match.details?.footballEvents && match.details.footballEvents.length > 0 ? (
+                    {footballTimeline.length > 0 ? (
                       <View style={styles.timelineList}>
-                        {match.details.footballEvents.map((evt, idx) => (
+                        {footballTimeline.map((evt, idx) => (
                           <View key={`event-${idx}`} style={styles.timelineItem}>
                             <View style={styles.minutePill}>
-                              <Text style={styles.minuteText}>{evt.minute}'</Text>
+                              <Text style={styles.minuteText}>{evt.minute}&apos;</Text>
                             </View>
                             <View style={styles.eventIconContainer}>
                               {evt.type === 'goal' && <GameLogo game="FÚTBOL" size={15} />}

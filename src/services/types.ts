@@ -72,6 +72,15 @@ export interface NotificationEventPrefs {
   reminder: boolean;
 }
 
+/**
+ * Override de alertas de un favorito (torneo o equipo): además de personalizar
+ * eventos concretos, `enabled: false` silencia TODAS las alertas de ese favorito
+ * de una sola vez (el interruptor rápido de la lista).
+ */
+export type NotificationEventOverride = Partial<NotificationEventPrefs> & {
+  enabled?: boolean;
+};
+
 /** Configuración del push con la app cerrada (Fase 2, servidor propio). */
 export interface PushSettings {
   /** URL del worker desplegado (p. ej. https://score-viewer-push.xxx.workers.dev). */
@@ -92,8 +101,8 @@ export interface PushSettings {
 export interface NotificationSettings {
   enabled: boolean;
   events: NotificationEventPrefs;
-  teams: Record<string, Partial<NotificationEventPrefs>>;
-  tournaments: Record<string, Partial<NotificationEventPrefs>>;
+  teams: Record<string, NotificationEventOverride>;
+  tournaments: Record<string, NotificationEventOverride>;
   reminderMinutes: number;
   /** Fase 2: push con la app cerrada (solo Android). */
   push?: PushSettings;
@@ -159,6 +168,21 @@ export interface FootballEvent {
   detail?: string;
 }
 
+/** Gol real de un partido de fútbol (Football-Data). */
+export interface MatchGoal {
+  /** Minuto reglamentario (sin el tiempo añadido). */
+  minute: number;
+  /** Minutos de añadido (ej. 45+2'). */
+  injuryTime?: number | null;
+  scorer?: string;
+  assist?: string;
+  /** REGULAR | PENALTY | OWN_GOAL */
+  type?: string;
+  team?: 'A' | 'B';
+  scoreA?: number | string;
+  scoreB?: number | string;
+}
+
 export interface MatchTeam {
   id?: string | number;
   name: string;
@@ -213,6 +237,8 @@ export interface Match {
     rosterB?: TeamRoster;
     h2hData?: MatchH2H;
     footballEvents?: FootballEvent[];
+    /** Goles reales consultados a Football-Data (para alertas y cronología). */
+    goals?: MatchGoal[];
     broadcastTv?: string[];
   };
 }

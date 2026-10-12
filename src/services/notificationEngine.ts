@@ -5,6 +5,7 @@
 import {
   Match,
   NotificationEventKey,
+  NotificationEventOverride,
   NotificationEventPrefs,
   NotificationSettings,
   SportCategory,
@@ -49,6 +50,78 @@ export const ESPORTS_EVENT_KEYS: NotificationEventKey[] = [
   'mapEnd',
   'seriesEnd',
 ];
+export const ALL_EVENT_KEYS: NotificationEventKey[] = [
+  'kickoff',
+  'goal',
+  'halfTime',
+  'fullTime',
+  'mapEnd',
+  'seriesEnd',
+  'reminder',
+];
+
+/** Todos los eventos apagados (favorito silenciado). */
+export const ALL_EVENTS_OFF: NotificationEventPrefs = {
+  kickoff: false,
+  goal: false,
+  halfTime: false,
+  fullTime: false,
+  mapEnd: false,
+  seriesEnd: false,
+  reminder: false,
+};
+
+/** Todos los eventos encendidos (preset "Todo"). */
+export const ALL_EVENTS_ON: NotificationEventPrefs = {
+  kickoff: true,
+  goal: true,
+  halfTime: true,
+  fullTime: true,
+  mapEnd: true,
+  seriesEnd: true,
+  reminder: true,
+};
+
+/** Presets rápidos de la sección "Eventos generales". */
+export const NOTIFICATION_EVENT_PRESETS: { id: string; label: string; events: NotificationEventPrefs }[] = [
+  { id: 'all', label: 'Todo', events: ALL_EVENTS_ON },
+  {
+    id: 'recommended',
+    label: 'Recomendado',
+    events: {
+      kickoff: true,
+      goal: true,
+      halfTime: false,
+      fullTime: true,
+      mapEnd: true,
+      seriesEnd: true,
+      reminder: true,
+    },
+  },
+  {
+    id: 'finals',
+    label: 'Solo finales',
+    events: {
+      kickoff: false,
+      goal: false,
+      halfTime: false,
+      fullTime: true,
+      mapEnd: true,
+      seriesEnd: true,
+      reminder: false,
+    },
+  },
+];
+
+/** Extrae solo las claves de evento de un override (ignora `enabled`). */
+function pickEventKeys(ov: NotificationEventOverride): Partial<NotificationEventPrefs> {
+  const out: Partial<NotificationEventPrefs> = {};
+  for (const key of ALL_EVENT_KEYS) {
+    const value = ov[key];
+    if (typeof value === 'boolean') out[key] = value;
+  }
+  return out;
+}
 
 export interface FavoriteGroup {
   key: string;
@@ -98,20 +171,25 @@ export function groupFavoriteTeams(favorites: string[]): FavoriteGroup[] {
     if (!f) continue;
     const key = f.toLowerCase();
     if (!groups.has(key)) {
-      groups.set(key, { key, label: f, members: [f] });
+      groups.set(key, { key, label: f, members: [f], game: resolveTeamGame(f) });
     }
   }
   return [...groups.values()];
 }
 
-/** Deporte de un equipo del catálogo (best-effort; undefined si no se encuentra). */
+/** Deporte de un equipo del catálogo (best-effort; undefined si no se encuentra o es ambiguo). */
 export function resolveTeamGame(label: string): SportCategory | undefined {
   try {
     const items = ScoreService.getTeamsCatalog({ query: label });
-    const exact =
-      items.find((t) => t.name.toLowerCase() === label.toLowerCase()) ||
-      items.find((t) => t.name.toLowerCase().includes(label.toLowerCase()));
-    return exact?.game;
+    const lower = label.toLowerCase();
+    const exact = items.filter((t) => t.name.toLowerCase() === lower);
+    const pool =
+      exact.length > 0 ? exact : items.filter((t) => t.name.toLowerCase().includes(lower));
+    if (pool.length === 0) return undefined;
+    // Si el mismo nombre existe en varios juegos (p. ej. G2 en LoL y CS2) no se
+    // fuerza un deporte: el favorito vale para cualquiera de ellos.
+    const games = [...new Set(pool.map((t) => t.game))];
+    return games.length === 1 ? games[0] : undefined;
   } catch {
     return undefined;
   }
@@ -140,6 +218,17 @@ export function createMatchPrefsResolver(
     let prefs: NotificationEventPrefs = { ...settings.events };
     let relevant = false;
 
+    /** Aplica un override encima de las preferencias efectivas. */
+    const applyOverride = (ov?: NotificationEventOverride) => {
+      if (!ov) return;
+      if (ov.enabled === false) {
+        // Interruptor rápido apagado: silencia TODOS los eventos del favorito.
+        prefs = { ...ALL_EVENTS_OFF };
+        return;
+      }
+      prefs = { ...prefs, ...pickEventKeys(ov) };
+    };
+
     const masterId = match.masterTournamentId
       ? String(match.masterTournamentId).toLowerCase()
       : '';
@@ -156,8 +245,7 @@ export function createMatchPrefsResolver(
         );
       if (byId || byFuzzy) {
         relevant = true;
-        const ov = settings.tournaments[g.key];
-        if (ov) prefs = { ...prefs, ...ov };
+        applyOverride(settings.tournaments[g.key]);
       }
     }
 
@@ -167,8 +255,7 @@ export function createMatchPrefsResolver(
         isTeamFavorite(match.teamB.name, match.teamB.shortName, g.members);
       if (teamHit) {
         relevant = true;
-        const ov = settings.teams[g.key];
-        if (ov) prefs = { ...prefs, ...ov };
+        applyOverride(settings.teams[g.key]);
       }
     }
 

@@ -95,6 +95,8 @@ export const PushService = {
         tournaments: settings.tournaments,
         reminderMinutes: settings.reminderMinutes,
       },
+      // Juegos activos en la app: el servidor ignora los desactivados (p. ej. CS2).
+      enabledGames: config.enabledGames,
       teamFavorites: groupFavoriteTeams(config.favoriteTeams).map((g) => ({
         key: g.key,
         game: g.game,

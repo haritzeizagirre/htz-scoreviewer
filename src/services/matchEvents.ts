@@ -5,13 +5,22 @@
  * dos cargas consecutivas y produce notificaciones (inicio, gol, descanso,
  * final, fin de mapa, resultado de serie). Sin React, sin red, sin storage,
  * para poder testearlo de forma aislada.
+ *
+ * Reglas anti-ruido:
+ * - Sin estado anterior no se genera nada (abrir la app a mitad de partido no
+ *   dispara un aluvión de avisos).
+ * - Con la foto anterior antigua (app en segundo plano, fuente caída...) los
+ *   avisos "de momento" (inicio, gol, descanso, fin de mapa) se descartan: ya
+ *   no aportan nada. Los resultados finales sí se avisan siempre.
  */
 import {
   Match,
+  MatchGoal,
   MatchStatus,
   NotificationEventKey,
   NotificationEventPrefs,
   NotificationSettings,
+  SportCategory,
 } from './types';
 
 /** Estado resumido de un partido en una carga concreta. */
@@ -20,8 +29,13 @@ export interface MatchSnapshot {
   scoreA: number | string;
   scoreB: number | string;
   roundOrTime?: string;
-  /** Mapas/juegos ya finalizados, por posición. */
-  finishedMaps: Record<number, { mapName: string; winner?: 'A' | 'B' }>;
+  /** Mapas/juegos ya finalizados, por posición (con marcador si se conoce). */
+  finishedMaps: Record<
+    number,
+    { mapName: string; winner?: 'A' | 'B'; scoreA?: number | string; scoreB?: number | string }
+  >;
+  /** Momento (epoch ms) en que se tomó esta foto; evita avisos tardíos. */
+  seenAt?: number;
 }
 
 export interface PendingNotification {
@@ -29,20 +43,35 @@ export interface PendingNotification {
   event: NotificationEventKey;
   title: string;
   body: string;
+  /** Deporte del partido: en Android elige el canal de notificación. */
+  game?: SportCategory;
 }
+
+/** La foto anterior más antigua que esto ya no sirve para avisar del inicio. */
+export const KICKOFF_MAX_AGE_MS = 12 * 60_000;
+/**
+ * Si el partido empezó hace más de esto cuando lo detectamos "en directo", el
+ * aviso de inicio ya no aporta nada (caso típico: fuente con retraso y el
+ * partido ya va 5-0). Se omite.
+ */
+export const KICKOFF_MAX_START_AGE_MS = 10 * 60_000;
+/** La foto anterior más antigua que esto ya no sirve para avisos "en vivo". */
+export const LIVE_EVENT_MAX_AGE_MS = 30 * 60_000;
 
 function toNum(value: number | string): number | null {
   const n = typeof value === 'number' ? value : parseInt(String(value), 10);
   return isNaN(n) ? null : n;
 }
 
-export function toMatchSnapshot(m: Match): MatchSnapshot {
+export function toMatchSnapshot(m: Match, nowMs: number = Date.now()): MatchSnapshot {
   const finishedMaps: MatchSnapshot['finishedMaps'] = {};
   for (const g of m.details?.gamesBreakdown || []) {
     if (g.status === 'finished') {
       finishedMaps[g.position] = {
         mapName: g.mapName || `Mapa ${g.position}`,
         winner: g.winnerTeam,
+        scoreA: g.scoreA,
+        scoreB: g.scoreB,
       };
     }
   }
@@ -52,7 +81,24 @@ export function toMatchSnapshot(m: Match): MatchSnapshot {
     scoreB: m.teamB.score,
     roundOrTime: m.liveRoundScore?.roundOrTime,
     finishedMaps,
+    seenAt: nowMs,
   };
+}
+
+/** "34'" o "45+2'" a partir del minuto y el añadido. */
+function formatGoalMinute(g: MatchGoal): string {
+  const extra = typeof g.injuryTime === 'number' && g.injuryTime > 0 ? `+${g.injuryTime}` : '';
+  return `${g.minute}${extra}'`;
+}
+
+/** Marcador corto de un mapa si ambas cifras son numéricas (" · 13-10"). */
+function mapScoreSuffix(map: { scoreA?: number | string; scoreB?: number | string }): string {
+  const a = map.scoreA;
+  const b = map.scoreB;
+  const hasA = typeof a === 'number' || (typeof a === 'string' && a.trim() !== '');
+  const hasB = typeof b === 'number' || (typeof b === 'string' && b.trim() !== '');
+  if (!hasA || !hasB) return '';
+  return ` · ${a}-${b}`;
 }
 
 /**
@@ -63,7 +109,8 @@ export function toMatchSnapshot(m: Match): MatchSnapshot {
 export function diffMatchEvents(
   match: Match,
   prev: MatchSnapshot | undefined,
-  prefs: NotificationEventPrefs
+  prefs: NotificationEventPrefs,
+  nowMs: number = Date.now()
 ): PendingNotification[] {
   const out: PendingNotification[] = [];
   if (!prev) return out;
@@ -73,57 +120,93 @@ export function diffMatchEvents(
   const shortB = match.teamB.shortName || match.teamB.name;
   const league = match.league;
 
-  // 1. Inicio del partido/serie
-  if (prefs.kickoff && prev.status !== 'LIVE' && match.status === 'LIVE') {
+  // Antigüedad de la foto anterior: descarta avisos que llegan demasiado tarde
+  // (app vuelta de segundo plano, fuente caída, servidor recuperado...).
+  const prevAgeMs = typeof prev.seenAt === 'number' ? Math.max(0, nowMs - prev.seenAt) : 0;
+  const kickoffFresh = prevAgeMs <= KICKOFF_MAX_AGE_MS;
+  const liveFresh = prevAgeMs <= LIVE_EVENT_MAX_AGE_MS;
+
+  // 1. Inicio del partido/serie (solo si acaba de empezar de verdad)
+  const startMs = new Date(match.startTimeIso).getTime();
+  const startAgeOk =
+    isNaN(startMs) || startMs > nowMs || nowMs - startMs <= KICKOFF_MAX_START_AGE_MS;
+  if (prefs.kickoff && kickoffFresh && startAgeOk && prev.status !== 'LIVE' && match.status === 'LIVE') {
     out.push({
       dedupeKey: `${match.id}:kickoff`,
       event: 'kickoff',
+      game: match.game,
       title: `En directo: ${shortA} vs ${shortB}`,
       body: league,
     });
   }
 
   // 2. Gol (fútbol, solo con partido ya en juego para evitar falsos positivos)
-  if (isFootball && prefs.goal && match.status === 'LIVE' && prev.status === 'LIVE') {
+  if (isFootball && prefs.goal && liveFresh && match.status === 'LIVE' && prev.status === 'LIVE') {
     const nA = toNum(match.teamA.score);
     const nB = toNum(match.teamB.score);
     const pA = toNum(prev.scoreA);
     const pB = toNum(prev.scoreB);
     if (nA !== null && nB !== null && pA !== null && pB !== null && (nA > pA || nB > pB)) {
       const minute = match.liveRoundScore?.roundOrTime ? ` · ${match.liveRoundScore.roundOrTime}` : '';
-      out.push({
-        dedupeKey: `${match.id}:goal:${nA}-${nB}`,
-        event: 'goal',
-        title: `Gol: ${shortA} ${nA}-${nB} ${shortB}`,
-        body: `${league}${minute}`,
-      });
+      const goals = match.details?.goals || [];
+      const latestGoal = goals.length > 0 ? goals[goals.length - 1] : undefined;
+      const scorer = latestGoal?.scorer?.trim();
+      if (scorer && latestGoal) {
+        const goalType = (latestGoal.type || '').toUpperCase();
+        const prefix =
+          goalType === 'PENALTY'
+            ? 'Penalti de'
+            : goalType === 'OWN_GOAL'
+            ? 'Gol en propia de'
+            : 'Gol de';
+        out.push({
+          dedupeKey: `${match.id}:goal:${nA}-${nB}`,
+          event: 'goal',
+          game: match.game,
+          title: `${prefix} ${scorer} (${formatGoalMinute(latestGoal)})`,
+          body: `${shortA} ${nA}-${nB} ${shortB} · ${league}`,
+        });
+      } else {
+        out.push({
+          dedupeKey: `${match.id}:goal:${nA}-${nB}`,
+          event: 'goal',
+          game: match.game,
+          title: `Gol: ${shortA} ${nA}-${nB} ${shortB}`,
+          body: `${league}${minute}`,
+        });
+      }
     }
   }
 
   // 3. Descanso (fútbol)
-  if (isFootball && prefs.halfTime && match.status === 'LIVE' && prev.status === 'LIVE') {
+  if (isFootball && prefs.halfTime && liveFresh && match.status === 'LIVE' && prev.status === 'LIVE') {
     const nowHalf = (match.liveRoundScore?.roundOrTime || '').toLowerCase().includes('descanso');
     const wasHalf = (prev.roundOrTime || '').toLowerCase().includes('descanso');
     if (nowHalf && !wasHalf) {
       out.push({
         dedupeKey: `${match.id}:halfTime`,
         event: 'halfTime',
+        game: match.game,
         title: `Descanso: ${shortA} ${match.teamA.score}-${match.teamB.score} ${shortB}`,
         body: league,
       });
     }
   }
 
-  // 4. Fin de mapa/juego (esports)
-  if (!isFootball && prefs.mapEnd) {
+  // 4. Fin de mapa/juego (esports), con el marcador de ESE mapa si se conoce.
+  if (!isFootball && prefs.mapEnd && liveFresh) {
     for (const g of match.details?.gamesBreakdown || []) {
       if (g.status === 'finished' && !prev.finishedMaps[g.position]) {
         const winner = g.winnerTeam === 'A' ? shortA : g.winnerTeam === 'B' ? shortB : '';
         const mapName = g.mapName || `Mapa ${g.position}`;
+        const score = mapScoreSuffix(g);
         out.push({
           dedupeKey: `${match.id}:map:${g.position}`,
           event: 'mapEnd',
-          title: winner ? `${mapName} para ${winner}` : `${mapName} finalizado`,
+          game: match.game,
+          title: winner
+            ? `${mapName} para ${winner}${score}`
+            : `${mapName} finalizado${score}`,
           body: `Serie ${match.teamA.score}-${match.teamB.score} · ${shortA} vs ${shortB}`,
         });
       }
@@ -136,6 +219,7 @@ export function diffMatchEvents(
       out.push({
         dedupeKey: `${match.id}:fullTime`,
         event: 'fullTime',
+        game: match.game,
         title: `Final: ${shortA} ${match.teamA.score}-${match.teamB.score} ${shortB}`,
         body: league,
       });
@@ -144,6 +228,7 @@ export function diffMatchEvents(
       out.push({
         dedupeKey: `${match.id}:seriesEnd`,
         event: 'seriesEnd',
+        game: match.game,
         title: `Resultado final: ${shortA} ${match.teamA.score}-${match.teamB.score} ${shortB}`,
         body: league,
       });
@@ -188,6 +273,7 @@ export function findUpcomingReminders(
     out.push({
       dedupeKey,
       event: 'reminder',
+      game: m.game,
       title: `En ${mins} min: ${shortA} vs ${shortB}`,
       body: m.league,
     });

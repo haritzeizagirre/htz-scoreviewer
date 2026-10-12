@@ -10,6 +10,7 @@ import {
   MatchStream,
   MatchMapGame,
   FootballEvent,
+  MatchGoal,
   TournamentItem,
   TeamCatalogItem,
   LiveRoundScore,
@@ -1520,6 +1521,10 @@ export function generateMatchGames(
     DOTA2: ['Partida 1', 'Partida 2', 'Partida 3', 'Partida 4', 'Partida 5'],
   };
 
+  // Juegos cuyos marcadores por mapa son rondas (no kills): solo esos muestran
+  // "13-10" en la ficha y en las notificaciones.
+  const roundScoreGames: SportCategory[] = ['VALORANT', 'CS2', 'R6'];
+
   const pool = mapPools[game] || ['Mapa 1', 'Mapa 2', 'Mapa 3'];
   const total = bestOf || 3;
   const result: MatchMapGame[] = [];
@@ -1529,6 +1534,8 @@ export function generateMatchGames(
     let status: 'finished' | 'running' | 'not_started' = 'not_started';
     let winnerTeam: 'A' | 'B' | undefined;
     let duration: string | undefined;
+    let scoreA: number | undefined;
+    let scoreB: number | undefined;
 
     if (rawG) {
       if (rawG.status === 'finished') status = 'finished';
@@ -1541,14 +1548,27 @@ export function generateMatchGames(
       if (rawG.length) {
         duration = `${Math.round(rawG.length / 60)} min`;
       }
+
+      // Marcador del mapa (PandaScore: results[] con team_id + score).
+      if (roundScoreGames.includes(game) && Array.isArray(rawG.results)) {
+        const resA =
+          rawG.results.find((r: any) => oppA && r?.team_id === oppA.id) || rawG.results[0];
+        const resB =
+          rawG.results.find((r: any) => oppB && r?.team_id === oppB.id) || rawG.results[1];
+        if (resA && typeof resA.score === 'number') scoreA = resA.score;
+        if (resB && typeof resB.score === 'number') scoreB = resB.score;
+      }
     }
 
     result.push({
       position: i + 1,
-      mapName: pool[i % pool.length],
+      // Nombre real del mapa si la fuente lo trae (p. ej. "Haven"); si no, pool.
+      mapName: rawG?.map?.name || pool[i % pool.length],
       status,
       winnerTeam,
       duration,
+      scoreA,
+      scoreB,
     });
   }
 
@@ -2751,35 +2771,9 @@ export function mapFootballDataMatch(m: any): Match {
   const playersAway = getKnownTeamRoster(awayName, 'FÚTBOL');
   const streams = getDefaultStreams('FÚTBOL', m.competition?.name);
 
-  // Generar eventos de partido (goles y tarjetas según marcador y estado)
+  // Los goles reales se consultan aparte (ScoreService.fetchFootballMatchGoals)
+  // solo cuando hacen falta para las alertas: nada de inventar cronologías.
   const footballEvents: FootballEvent[] = [];
-  if (typeof scoreH === 'number' && scoreH > 0) {
-    footballEvents.push({
-      minute: 27,
-      type: 'goal',
-      team: 'A',
-      player: playersHome[9]?.nickname || playersHome[10]?.nickname || homeName,
-      detail: 'Gol de jugada colectiva',
-    });
-  }
-  if (typeof scoreA === 'number' && scoreA > 0) {
-    footballEvents.push({
-      minute: 64,
-      type: 'goal',
-      team: 'B',
-      player: playersAway[9]?.nickname || playersAway[10]?.nickname || awayName,
-      detail: 'Remate dentro del área',
-    });
-  }
-  if (status === 'FINISHED' || status === 'LIVE') {
-    footballEvents.push({
-      minute: 42,
-      type: 'card_yellow',
-      team: 'A',
-      player: playersHome[2]?.nickname || 'Defensa Central',
-      detail: 'Falta táctica',
-    });
-  }
 
   const timeInfo = status === 'FINISHED' ? `${scoreH} - ${scoreA}` : schedule.badgeText;
 
@@ -3707,6 +3701,66 @@ export const ScoreService = {
     }
 
     return rawMatches.map(mapFootballDataMatch);
+  },
+
+  /**
+   * Goles reales (minuto + goleador) de un partido de Football-Data. Se pide el
+   * detalle `/v4/matches/{id}` solo cuando hace falta (cambió el marcador y el
+   * partido interesa para las alertas), porque el listado no trae los goles.
+   * Devuelve [] si no hay goles y null si la consulta falló (para reintentar).
+   */
+  async fetchFootballMatchGoals(
+    rawMatchId: string | number,
+    token: string
+  ): Promise<MatchGoal[] | null> {
+    const cleanToken = token.trim();
+    if (!cleanToken || !rawMatchId) return null;
+
+    const path = `/v4/matches/${rawMatchId}`;
+    const isWeb = Platform.OS === 'web';
+    let data: any = null;
+
+    if (isWeb) {
+      try {
+        const proxyUrl = `/api/proxy/football?token=${encodeURIComponent(cleanToken)}&path=${encodeURIComponent(path)}`;
+        const res = await fetch(proxyUrl);
+        if (res.ok) data = await res.json();
+      } catch (proxyErr) {
+        console.warn('Proxy local Football-Data (goles) falló:', proxyErr);
+      }
+    }
+
+    if (!data) {
+      try {
+        const res = await fetch(`https://api.football-data.org${path}`, {
+          headers: { 'X-Auth-Token': cleanToken, Accept: 'application/json' },
+        });
+        if (res.ok) data = await res.json();
+      } catch (directErr) {
+        console.warn('Llamada directa Football-Data (goles) falló:', directErr);
+      }
+    }
+
+    if (!data || !Array.isArray(data.goals)) return null;
+
+    const homeId = data.homeTeam?.id;
+    const awayId = data.awayTeam?.id;
+    const goals: MatchGoal[] = [];
+    for (const g of data.goals) {
+      if (typeof g?.minute !== 'number') continue;
+      const teamId = g.team?.id;
+      goals.push({
+        minute: g.minute,
+        injuryTime: typeof g.injuryTime === 'number' ? g.injuryTime : null,
+        scorer: g.scorer?.name,
+        assist: g.assist?.name,
+        type: g.type,
+        team: teamId && homeId && teamId === homeId ? 'A' : teamId && awayId && teamId === awayId ? 'B' : undefined,
+        scoreA: typeof g.score?.home === 'number' ? g.score.home : undefined,
+        scoreB: typeof g.score?.away === 'number' ? g.score.away : undefined,
+      });
+    }
+    return goals;
   },
 
   /**

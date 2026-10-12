@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Modal,
   View,
@@ -6,21 +6,34 @@ import {
   StyleSheet,
   ScrollView,
   TouchableOpacity,
+  Switch,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { Bell, BellOff, ChevronDown, ChevronUp, RotateCcw, X, CloudUpload } from 'lucide-react-native';
+import {
+  Bell,
+  BellOff,
+  ChevronDown,
+  ChevronUp,
+  RotateCcw,
+  X,
+  CloudUpload,
+  Search,
+} from 'lucide-react-native';
 import {
   Gtr3ConfigState,
   NotificationEventKey,
+  NotificationEventOverride,
   NotificationEventPrefs,
   NotificationSettings,
 } from '../services/types';
 import { AppNotifications, AppNotificationPermission } from '../services/notificationService';
 import {
+  ALL_EVENT_KEYS,
   DEFAULT_NOTIFICATION_SETTINGS,
   ESPORTS_EVENT_KEYS,
   FOOTBALL_EVENT_KEYS,
   NOTIFICATION_EVENT_LABELS,
+  NOTIFICATION_EVENT_PRESETS,
   FavoriteGroup,
   groupFavoriteTeams,
   groupFavoriteTournaments,
@@ -63,6 +76,16 @@ function eventKeysForGroup(group: FavoriteGroup): NotificationEventKey[] {
   return [...FOOTBALL_EVENT_KEYS, ...ESPORTS_EVENT_KEYS];
 }
 
+/** ¿El favorito tiene personalizaciones (aparte del interruptor general)? */
+function hasEventOverrides(override?: NotificationEventOverride): boolean {
+  if (!override) return false;
+  return ALL_EVENT_KEYS.some((k) => typeof override[k] === 'boolean');
+}
+
+function sameEvents(a: NotificationEventPrefs, b: NotificationEventPrefs): boolean {
+  return ALL_EVENT_KEYS.every((k) => a[k] === b[k]);
+}
+
 export const NotificationsModal: React.FC<NotificationsModalProps> = ({
   visible,
   onClose,
@@ -74,6 +97,8 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
   const [permission, setPermission] = useState<AppNotificationPermission>('undetermined');
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
+  const [teamQuery, setTeamQuery] = useState('');
+  const [tournamentQuery, setTournamentQuery] = useState('');
   // Fase 2: push con la app cerrada
   const [pushUrlDraft, setPushUrlDraft] = useState(settings.push?.serverUrl ?? '');
   const [pushKeyDraft, setPushKeyDraft] = useState(settings.push?.authKey ?? '');
@@ -106,15 +131,45 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
   const setEvent = (key: NotificationEventKey, v: boolean) =>
     update({ ...settings, events: { ...settings.events, [key]: v } });
   const setReminderMinutes = (mins: number) => update({ ...settings, reminderMinutes: mins });
+  const applyPreset = (events: NotificationEventPrefs) => update({ ...settings, events });
 
   const setOverride = (
     scope: 'teams' | 'tournaments',
     key: string,
-    next: Partial<NotificationEventPrefs> | null
+    next: NotificationEventOverride | null
   ) => {
     const bucket = { ...settings[scope] };
     if (next === null || Object.keys(next).length === 0) delete bucket[key];
     else bucket[key] = next;
+    update({ ...settings, [scope]: bucket });
+  };
+
+  /** Interruptor rápido: apaga/enciende TODAS las alertas de un favorito. */
+  const setFavoriteEnabled = (scope: 'teams' | 'tournaments', key: string, enabled: boolean) => {
+    const current = settings[scope][key];
+    if (enabled) {
+      if (!current) return;
+      const { enabled: _ignored, ...rest } = current;
+      setOverride(scope, key, Object.keys(rest).length > 0 ? rest : null);
+    } else {
+      setOverride(scope, key, { ...(current ?? {}), enabled: false });
+    }
+  };
+
+  /** Acciones masivas de una sección ("Reactivar"/"Silenciar"). */
+  const setBulkEnabled = (scope: 'teams' | 'tournaments', groups: FavoriteGroup[], enabled: boolean) => {
+    const bucket = { ...settings[scope] };
+    for (const g of groups) {
+      const current = bucket[g.key];
+      if (enabled) {
+        if (!current) continue;
+        const { enabled: _ignored, ...rest } = current;
+        if (Object.keys(rest).length === 0) delete bucket[g.key];
+        else bucket[g.key] = rest;
+      } else {
+        bucket[g.key] = { ...(current ?? {}), enabled: false };
+      }
+    }
     update({ ...settings, [scope]: bucket });
   };
 
@@ -217,43 +272,75 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
 
   const renderFavoriteGroup = (group: FavoriteGroup, scope: 'teams' | 'tournaments') => {
     const override = settings[scope][group.key];
-    const hasOverride = Boolean(override && Object.keys(override).length > 0);
+    const isMuted = override?.enabled === false;
+    const hasCustom = hasEventOverrides(override);
     const expanded = expandedKey === `${scope}:${group.key}`;
     const game = scope === 'teams' ? group.game ?? resolveTeamGame(group.label) : group.game;
+    const statusLabel = isMuted ? 'Silenciado' : hasCustom ? 'Personalizado' : 'General';
 
     return (
       <View key={`${scope}:${group.key}`} style={styles.favBlock}>
-        <TouchableOpacity
-          style={styles.favRow}
-          onPress={() => setExpandedKey(expanded ? null : `${scope}:${group.key}`)}
-          activeOpacity={0.7}
-          accessibilityRole="button"
-          accessibilityLabel={`Alertas de ${group.label}`}
-        >
-          <Text style={styles.favLabel} numberOfLines={1}>
-            {group.label}
-          </Text>
-          <Text style={[styles.favStatus, hasOverride && styles.favStatusCustom]}>
-            {hasOverride ? 'Personalizado' : 'General'}
-          </Text>
-          {expanded ? (
-            <ChevronUp size={15} color={htzTokens.colors.outline} />
-          ) : (
-            <ChevronDown size={15} color={htzTokens.colors.outline} />
-          )}
-        </TouchableOpacity>
+        <View style={styles.favRow}>
+          <TouchableOpacity
+            style={styles.favRowMain}
+            onPress={() => setExpandedKey(expanded ? null : `${scope}:${group.key}`)}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel={`Alertas de ${group.label}`}
+          >
+            <Text style={[styles.favLabel, isMuted && styles.favLabelMuted]} numberOfLines={1}>
+              {group.label}
+            </Text>
+            <Text
+              style={[
+                styles.favStatus,
+                hasCustom && !isMuted && styles.favStatusCustom,
+                isMuted && styles.favStatusMuted,
+              ]}
+            >
+              {statusLabel}
+            </Text>
+            {expanded ? (
+              <ChevronUp size={15} color={htzTokens.colors.outline} />
+            ) : (
+              <ChevronDown size={15} color={htzTokens.colors.outline} />
+            )}
+          </TouchableOpacity>
+          <Switch
+            style={styles.favSwitch}
+            trackColor={{
+              false: htzTokens.colors.surfaceVariant,
+              true: htzTokens.colors.primary,
+            }}
+            thumbColor="#FFFFFF"
+            value={!isMuted}
+            onValueChange={(v) => setFavoriteEnabled(scope, group.key, v)}
+            accessibilityLabel={
+              isMuted ? `Activar alertas de ${group.label}` : `Silenciar alertas de ${group.label}`
+            }
+          />
+        </View>
 
         {expanded && (
           <View style={styles.favMatrix}>
-            {eventKeysForGroup({ ...group, game }).map((key) =>
-              renderEventToggle(key, override?.[key] ?? settings.events[key], (v) =>
-                setOverride(scope, group.key, { ...(override ?? {}), [key]: v })
-              )
+            {isMuted ? (
+              <Text style={styles.mutedHint}>
+                Alertas silenciadas para este favorito. Activa el interruptor para elegir qué avisos
+                quieres.
+              </Text>
+            ) : (
+              <>
+                {eventKeysForGroup({ ...group, game }).map((key) =>
+                  renderEventToggle(key, override?.[key] ?? settings.events[key], (v) =>
+                    setOverride(scope, group.key, { ...(override ?? {}), [key]: v })
+                  )
+                )}
+                {renderEventToggle('reminder', override?.reminder ?? settings.events.reminder, (v) =>
+                  setOverride(scope, group.key, { ...(override ?? {}), reminder: v })
+                )}
+              </>
             )}
-            {renderEventToggle('reminder', override?.reminder ?? settings.events.reminder, (v) =>
-              setOverride(scope, group.key, { ...(override ?? {}), reminder: v })
-            )}
-            {hasOverride && (
+            {hasCustom && (
               <TouchableOpacity
                 style={styles.resetRow}
                 onPress={() => setOverride(scope, group.key, null)}
@@ -270,8 +357,89 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
     );
   };
 
-  const teamGroups = groupFavoriteTeams(config.favoriteTeams);
-  const tournamentGroups = groupFavoriteTournaments(config.favoriteTournaments);
+  const teamGroups = useMemo(() => groupFavoriteTeams(config.favoriteTeams), [config.favoriteTeams]);
+  const tournamentGroups = useMemo(
+    () => groupFavoriteTournaments(config.favoriteTournaments),
+    [config.favoriteTournaments]
+  );
+  const filteredTeams = useMemo(() => {
+    const q = teamQuery.trim().toLowerCase();
+    return q ? teamGroups.filter((g) => g.label.toLowerCase().includes(q)) : teamGroups;
+  }, [teamGroups, teamQuery]);
+  const filteredTournaments = useMemo(() => {
+    const q = tournamentQuery.trim().toLowerCase();
+    return q
+      ? tournamentGroups.filter((g) => g.label.toLowerCase().includes(q))
+      : tournamentGroups;
+  }, [tournamentGroups, tournamentQuery]);
+  const mutedTeams = filteredTeams.filter((g) => settings.teams[g.key]?.enabled === false).length;
+  const mutedTournaments = filteredTournaments.filter(
+    (g) => settings.tournaments[g.key]?.enabled === false
+  ).length;
+
+  const renderFavoritesSection = (
+    title: string,
+    scope: 'teams' | 'tournaments',
+    groups: FavoriteGroup[],
+    filtered: FavoriteGroup[],
+    query: string,
+    setQuery: (v: string) => void,
+    mutedCount: number
+  ) => (
+    <>
+      <View style={styles.sectionHeaderRow}>
+        <Text style={styles.sectionHeader}>{title}</Text>
+        <View style={styles.sectionActions}>
+          <HtzButton
+            variant="ghost"
+            size="sm"
+            onPress={() => setBulkEnabled(scope, filtered, true)}
+            textStyle={styles.bulkText}
+          >
+            Reactivar
+          </HtzButton>
+          <Text style={styles.bulkSeparator}>·</Text>
+          <HtzButton
+            variant="ghost"
+            size="sm"
+            onPress={() => setBulkEnabled(scope, filtered, false)}
+            textStyle={styles.bulkText}
+          >
+            Silenciar
+          </HtzButton>
+        </View>
+      </View>
+      <HtzCard style={styles.card}>
+        {groups.length === 0 ? (
+          <Text style={styles.emptyText}>No tienes {title.toLowerCase()} todavía.</Text>
+        ) : (
+          <>
+            {groups.length > 6 && (
+              <HtzInput
+                placeholder="Buscar…"
+                value={query}
+                onChangeText={setQuery}
+                autoCapitalize="none"
+                autoCorrect={false}
+                icon={<Search size={14} color={htzTokens.colors.outline} />}
+                containerStyle={styles.searchInput}
+              />
+            )}
+            {mutedCount > 0 && (
+              <Text style={styles.mutedSummary}>
+                {mutedCount} silenciado{mutedCount === 1 ? '' : 's'}
+              </Text>
+            )}
+            {filtered.length === 0 ? (
+              <Text style={styles.emptyText}>Sin resultados para «{query}».</Text>
+            ) : (
+              filtered.map((g) => renderFavoriteGroup(g, scope))
+            )}
+          </>
+        )}
+      </HtzCard>
+    </>
+  );
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
@@ -343,6 +511,19 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
               {/* Eventos generales */}
               <Text style={styles.sectionHeader}>Eventos generales</Text>
               <HtzCard style={styles.card}>
+                <View style={styles.presetsRow}>
+                  {NOTIFICATION_EVENT_PRESETS.map((preset) => (
+                    <HtzChip
+                      key={preset.id}
+                      label={preset.label}
+                      selected={sameEvents(settings.events, preset.events)}
+                      onPress={() => applyPreset(preset.events)}
+                    />
+                  ))}
+                </View>
+                <Text style={styles.presetsHint}>
+                  Los presets rellenan la matriz general; luego puedes afinar torneo a torneo.
+                </Text>
                 <Text style={styles.groupLabel}>Fútbol</Text>
                 {FOOTBALL_EVENT_KEYS.map((key) =>
                   renderEventToggle(key, settings.events[key], (v) => setEvent(key, v))
@@ -366,24 +547,26 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                 </View>
               </HtzCard>
 
-              {/* Matriz por favorito */}
-              <Text style={styles.sectionHeader}>Tus torneos favoritos</Text>
-              <HtzCard style={styles.card}>
-                {tournamentGroups.length === 0 ? (
-                  <Text style={styles.emptyText}>No tienes torneos favoritos todavía.</Text>
-                ) : (
-                  tournamentGroups.map((g) => renderFavoriteGroup(g, 'tournaments'))
-                )}
-              </HtzCard>
+              {/* Matriz por favorito: interruptor rápido + búsqueda + acciones masivas */}
+              {renderFavoritesSection(
+                'Tus torneos favoritos',
+                'tournaments',
+                tournamentGroups,
+                filteredTournaments,
+                tournamentQuery,
+                setTournamentQuery,
+                mutedTournaments
+              )}
 
-              <Text style={styles.sectionHeader}>Tus equipos favoritos</Text>
-              <HtzCard style={styles.card}>
-                {teamGroups.length === 0 ? (
-                  <Text style={styles.emptyText}>No tienes equipos favoritos todavía.</Text>
-                ) : (
-                  teamGroups.map((g) => renderFavoriteGroup(g, 'teams'))
-                )}
-              </HtzCard>
+              {renderFavoritesSection(
+                'Tus equipos favoritos',
+                'teams',
+                teamGroups,
+                filteredTeams,
+                teamQuery,
+                setTeamQuery,
+                mutedTeams
+              )}
 
               {/* Fase 2: push con la app cerrada */}
               <Text style={styles.sectionHeader}>Push con la app cerrada (Fase 2)</Text>
@@ -431,7 +614,8 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                     </View>
                     <Text style={styles.hint}>
                       Con el push conectado, el servidor envía los avisos (incluso con la app
-                      cerrada) y la app deja de duplicarlos.
+                      cerrada) y la app deja de duplicarlos. Respeta tus juegos activos y la matriz
+                      de alertas: un torneo silenciado tampoco avisa desde el servidor.
                     </Text>
                   </>
                 ) : (
@@ -465,6 +649,11 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                     </Text>
                   </>
                 )}
+                <Text style={styles.hint}>
+                  Consejo: en Android cada juego tiene su propio canal (Fútbol, Valorant, LoL, CS2,
+                  R6, Dota 2). Puedes silenciar un juego entero desde los ajustes de notificaciones
+                  del sistema.
+                </Text>
               </HtzCard>
 
               <View style={{ height: 30 }} />
@@ -554,6 +743,26 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     marginTop: 4,
   },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+    marginTop: 4,
+  },
+  sectionActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  bulkText: {
+    color: htzTokens.colors.inversePrimary,
+    fontSize: 11,
+  },
+  bulkSeparator: {
+    color: htzTokens.colors.outline,
+    fontSize: 12,
+    marginHorizontal: 2,
+  },
   groupLabel: {
     color: htzTokens.colors.outline,
     fontSize: 10,
@@ -564,6 +773,19 @@ const styles = StyleSheet.create({
   },
   groupLabelSpaced: {
     marginTop: 10,
+  },
+  presetsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    flexWrap: 'wrap',
+    marginBottom: 4,
+  },
+  presetsHint: {
+    color: htzTokens.colors.outline,
+    fontSize: 11,
+    lineHeight: 15,
+    marginTop: 6,
+    marginBottom: 10,
   },
   toggleRow: {
     paddingVertical: 2,
@@ -578,6 +800,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 8,
   },
+  searchInput: {
+    marginBottom: 6,
+  },
+  mutedSummary: {
+    color: htzTokens.colors.outline,
+    fontSize: 11,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
   favBlock: {
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(255, 255, 255, 0.06)',
@@ -586,13 +817,26 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingVertical: 10,
+    paddingVertical: 6,
+  },
+  favRowMain: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 4,
+  },
+  favSwitch: {
+    marginLeft: 2,
   },
   favLabel: {
     flex: 1,
     color: htzTokens.colors.onSurface,
     fontSize: 13,
     fontWeight: '600',
+  },
+  favLabelMuted: {
+    color: htzTokens.colors.outline,
   },
   favStatus: {
     color: htzTokens.colors.outline,
@@ -602,9 +846,18 @@ const styles = StyleSheet.create({
   favStatusCustom: {
     color: htzTokens.colors.primary,
   },
+  favStatusMuted: {
+    color: htzTokens.colors.warning,
+  },
   favMatrix: {
     paddingLeft: 8,
     paddingBottom: 8,
+  },
+  mutedHint: {
+    color: htzTokens.colors.outline,
+    fontSize: 12,
+    lineHeight: 17,
+    paddingVertical: 4,
   },
   resetRow: {
     flexDirection: 'row',
