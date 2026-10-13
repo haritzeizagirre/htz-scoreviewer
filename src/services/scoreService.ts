@@ -11,6 +11,12 @@ import {
   MatchMapGame,
   FootballEvent,
   MatchGoal,
+  FootballBooking,
+  FootballSubstitution,
+  FootballLineupPlayer,
+  FootballTeamLineup,
+  FootballTeamStats,
+  FootballMatchDetail,
   TournamentItem,
   TeamCatalogItem,
   LiveRoundScore,
@@ -20,6 +26,7 @@ import {
   MatchPreviewData,
 } from './types';
 import { formatMatchSchedule } from './dateUtils';
+import { R6StatsService } from './r6StatsService';
 
 // Margen máximo (en horas) para mostrar partidos finalizados en la pantalla principal.
 // Evita que se cuelen resultados de hace casi una semana en "Finalizados".
@@ -2876,6 +2883,203 @@ async function fetchFootballEndpoint(token: string, path: string): Promise<any |
   return null;
 }
 
+/**
+ * Caché en memoria del detalle de fútbol (minuto, goles, tarjetas, cambios,
+ * alineaciones). Los partidos en directo caducan en segundos; el resto en
+ * minutos, para no gastar cuota de Football-Data al reabrir la misma ficha.
+ */
+const FOOTBALL_DETAIL_CACHE = new Map<
+  string,
+  { ts: number; live: boolean; detail: FootballMatchDetail }
+>();
+const FOOTBALL_DETAIL_LIVE_TTL_MS = 45 * 1000;
+const FOOTBALL_DETAIL_STATIC_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Petición cruda del detalle de un partido (`/v4/matches/{id}`): minuto,
+ * goles, tarjetas, cambios, alineaciones y estadísticas de equipo.
+ * Devuelve null si la consulta falla (para poder reintentar).
+ */
+async function requestFootballMatchDetail(
+  rawMatchId: string | number,
+  token: string
+): Promise<any | null> {
+  const cleanToken = token.trim();
+  if (!cleanToken || !rawMatchId) return null;
+
+  const path = `/v4/matches/${rawMatchId}`;
+  const isWeb = Platform.OS === 'web';
+  let data: any = null;
+
+  if (isWeb) {
+    try {
+      const proxyUrl = `/api/proxy/football?token=${encodeURIComponent(cleanToken)}&path=${encodeURIComponent(path)}`;
+      const res = await fetch(proxyUrl);
+      if (res.ok) data = await res.json();
+    } catch (proxyErr) {
+      console.warn('Proxy local Football-Data (detalle) falló:', proxyErr);
+    }
+  }
+
+  if (!data) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    try {
+      const res = await fetch(`https://api.football-data.org${path}`, {
+        signal: controller.signal,
+        headers: { 'X-Auth-Token': cleanToken, Accept: 'application/json' },
+      });
+      if (res.ok) data = await res.json();
+    } catch (directErr) {
+      console.warn('Llamada directa Football-Data (detalle) falló:', directErr);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  return data;
+}
+
+/** Lado (A/B) al que pertenece un equipo del detalle comparando por id. */
+function footballDetailSide(
+  teamId: number | string | undefined | null,
+  homeId: number | string | undefined | null,
+  awayId: number | string | undefined | null
+): 'A' | 'B' | undefined {
+  if (teamId === undefined || teamId === null) return undefined;
+  if (homeId !== undefined && homeId !== null && String(teamId) === String(homeId)) return 'A';
+  if (awayId !== undefined && awayId !== null && String(teamId) === String(awayId)) return 'B';
+  return undefined;
+}
+
+/** Goles reales del payload de detalle (`goals[]`). */
+function mapFootballGoals(data: any): MatchGoal[] {
+  const homeId = data?.homeTeam?.id;
+  const awayId = data?.awayTeam?.id;
+  const goals: MatchGoal[] = [];
+  for (const g of Array.isArray(data?.goals) ? data.goals : []) {
+    if (typeof g?.minute !== 'number') continue;
+    goals.push({
+      minute: g.minute,
+      injuryTime: typeof g.injuryTime === 'number' ? g.injuryTime : null,
+      scorer: g.scorer?.name,
+      assist: g.assist?.name,
+      type: g.type,
+      team: footballDetailSide(g.team?.id, homeId, awayId),
+      scoreA: typeof g.score?.home === 'number' ? g.score.home : undefined,
+      scoreB: typeof g.score?.away === 'number' ? g.score.away : undefined,
+    });
+  }
+  return goals;
+}
+
+/** Amonestaciones y expulsiones del payload de detalle (`bookings[]`). */
+function mapFootballBookings(data: any): FootballBooking[] {
+  const homeId = data?.homeTeam?.id;
+  const awayId = data?.awayTeam?.id;
+  const bookings: FootballBooking[] = [];
+  for (const b of Array.isArray(data?.bookings) ? data.bookings : []) {
+    if (typeof b?.minute !== 'number') continue;
+    const card = String(b.card || 'YELLOW').toUpperCase();
+    bookings.push({
+      minute: b.minute,
+      injuryTime: typeof b.injuryTime === 'number' ? b.injuryTime : null,
+      card: card === 'RED' ? 'RED' : card === 'YELLOW_RED' ? 'YELLOW_RED' : 'YELLOW',
+      player: b.player?.name,
+      team: footballDetailSide(b.team?.id, homeId, awayId),
+    });
+  }
+  return bookings;
+}
+
+/** Cambios del payload de detalle (`substitutions[]`). */
+function mapFootballSubstitutions(data: any): FootballSubstitution[] {
+  const homeId = data?.homeTeam?.id;
+  const awayId = data?.awayTeam?.id;
+  const subs: FootballSubstitution[] = [];
+  for (const s of Array.isArray(data?.substitutions) ? data.substitutions : []) {
+    if (typeof s?.minute !== 'number') continue;
+    subs.push({
+      minute: s.minute,
+      injuryTime: typeof s.injuryTime === 'number' ? s.injuryTime : null,
+      playerIn: s.playerIn?.name,
+      playerOut: s.playerOut?.name,
+      team: footballDetailSide(s.team?.id, homeId, awayId),
+    });
+  }
+  return subs;
+}
+
+/** Alineación + banquillo + entrenador + dibujo de un equipo. */
+function mapFootballLineup(team: any): FootballTeamLineup | undefined {
+  const mapPlayer = (p: any): FootballLineupPlayer | null => {
+    if (!p || typeof p.name !== 'string' || !p.name.trim()) return null;
+    return {
+      id: p.id,
+      name: p.name,
+      position: typeof p.position === 'string' ? p.position : undefined,
+      shirtNumber: typeof p.shirtNumber === 'number' ? p.shirtNumber : null,
+    };
+  };
+
+  const starters = (Array.isArray(team?.lineup) ? team.lineup : [])
+    .map(mapPlayer)
+    .filter((p: FootballLineupPlayer | null): p is FootballLineupPlayer => p !== null);
+  const bench = (Array.isArray(team?.bench) ? team.bench : [])
+    .map(mapPlayer)
+    .filter((p: FootballLineupPlayer | null): p is FootballLineupPlayer => p !== null);
+  const formation = typeof team?.formation === 'string' && team.formation ? team.formation : undefined;
+  const coach = typeof team?.coach?.name === 'string' ? team.coach.name : undefined;
+
+  if (starters.length === 0 && bench.length === 0 && !formation && !coach) return undefined;
+  return { formation, coach, starters, bench };
+}
+
+/** Estadísticas de equipo (posesión, tiros, faltas...) de un lado. */
+function mapFootballTeamStats(stats: any): FootballTeamStats | undefined {
+  if (!stats || typeof stats !== 'object') return undefined;
+  const num = (key: string): number | undefined =>
+    typeof stats[key] === 'number' ? stats[key] : undefined;
+  const mapped: FootballTeamStats = {
+    ballPossession: num('ball_possession'),
+    shots: num('shots'),
+    shotsOnGoal: num('shots_on_goal'),
+    shotsOffGoal: num('shots_off_goal'),
+    fouls: num('fouls'),
+    cornerKicks: num('corner_kicks'),
+    offsides: num('offsides'),
+    saves: num('saves'),
+    yellowCards: num('yellow_cards'),
+    redCards: num('red_cards'),
+  };
+  return Object.values(mapped).some((v) => v !== undefined) ? mapped : undefined;
+}
+
+/** Convierte el payload de `/v4/matches/{id}` en el modelo interno de detalle. */
+export function mapFootballMatchDetail(data: any): FootballMatchDetail {
+  const referee = (Array.isArray(data?.referees) ? data.referees : []).find(
+    (r: any) => String(r?.type || '').toUpperCase() === 'REFEREE'
+  );
+
+  return {
+    status: data?.status,
+    minute: typeof data?.minute === 'number' ? data.minute : null,
+    injuryTime: typeof data?.injuryTime === 'number' ? data.injuryTime : null,
+    halfTimeA: typeof data?.score?.halfTime?.home === 'number' ? data.score.halfTime.home : null,
+    halfTimeB: typeof data?.score?.halfTime?.away === 'number' ? data.score.halfTime.away : null,
+    duration: data?.score?.duration,
+    venue: data?.venue || undefined,
+    referee: referee?.name,
+    goals: mapFootballGoals(data),
+    bookings: mapFootballBookings(data),
+    substitutions: mapFootballSubstitutions(data),
+    lineupA: mapFootballLineup(data?.homeTeam),
+    lineupB: mapFootballLineup(data?.awayTeam),
+    statsA: mapFootballTeamStats(data?.homeTeam?.statistics),
+    statsB: mapFootballTeamStats(data?.awayTeam?.statistics),
+  };
+}
+
 /** Caché en memoria de las previas (forma + H2H) para no repetir consultas. */
 const MATCH_PREVIEW_CACHE = new Map<string, { ts: number; data: MatchPreviewData }>();
 const MATCH_PREVIEW_TTL_MS = 10 * 60 * 1000;
@@ -3097,17 +3301,32 @@ export const ScoreService = {
       combined = [...combined, ...unmergedVlr];
     }
 
-    // Para cualquier otro partido en directo de esports con mapas en juego, asegurar liveRoundScore
+    // R6: PandaScore no publica el tanteo de rondas por mapa; se completa desde
+    // Gezzly (datos oficiales de Ubisoft) para que la insignia en directo y los
+    // avisos de "fin de mapa" muestren las rondas ("Chalet: 7-0") y no el
+    // marcador de la serie ("1-0"). Si Gezzly falla, la carga sigue igual.
+    if (combined.some((m) => m.game === 'R6')) {
+      await R6StatsService.enrichR6Matches(combined);
+    }
+
+    // Para cualquier otro partido en directo de esports con mapas en juego,
+    // asegurar liveRoundScore — pero solo con el tanteo REAL del mapa: antes se
+    // rellenaba con el marcador de la serie cuando la fuente no traía rondas
+    // (R6 y CS2 en directo) y la insignia mostraba "1-0".
     for (const m of combined) {
       if (m.status === 'LIVE' && !m.liveRoundScore && m.details?.gamesBreakdown) {
         const runningMap = m.details.gamesBreakdown.find((g) => g.status === 'running');
-        if (runningMap) {
+        if (
+          runningMap &&
+          typeof runningMap.scoreA === 'number' &&
+          typeof runningMap.scoreB === 'number'
+        ) {
           m.liveRoundScore = {
-            scoreA: typeof runningMap.scoreA === 'number' ? runningMap.scoreA : (typeof m.teamA.score === 'number' ? m.teamA.score : 0),
-            scoreB: typeof runningMap.scoreB === 'number' ? runningMap.scoreB : (typeof m.teamB.score === 'number' ? m.teamB.score : 0),
+            scoreA: runningMap.scoreA,
+            scoreB: runningMap.scoreB,
             mapName: runningMap.mapName,
             mapNumber: runningMap.position,
-            roundOrTime: `${runningMap.mapName || 'Mapa'}: ${runningMap.scoreA ?? 0}-${runningMap.scoreB ?? 0}`,
+            roundOrTime: `${runningMap.mapName || 'Mapa'}: ${runningMap.scoreA}-${runningMap.scoreB}`,
           };
         }
       }
@@ -3708,59 +3927,49 @@ export const ScoreService = {
    * detalle `/v4/matches/{id}` solo cuando hace falta (cambió el marcador y el
    * partido interesa para las alertas), porque el listado no trae los goles.
    * Devuelve [] si no hay goles y null si la consulta falló (para reintentar).
+   * No usa caché: cada llamada debe ver el último gol al instante.
    */
   async fetchFootballMatchGoals(
     rawMatchId: string | number,
     token: string
   ): Promise<MatchGoal[] | null> {
-    const cleanToken = token.trim();
-    if (!cleanToken || !rawMatchId) return null;
+    const data = await requestFootballMatchDetail(rawMatchId, token);
+    if (!data) return null;
+    return mapFootballGoals(data);
+  },
 
-    const path = `/v4/matches/${rawMatchId}`;
-    const isWeb = Platform.OS === 'web';
-    let data: any = null;
+  /**
+   * Detalle ampliado de un partido de fútbol para la pestaña Stats: minuto de
+   * juego, goles, tarjetas, cambios, alineaciones y estadísticas de equipo.
+   * Cacheado en memoria (los partidos en directo caducan pronto; los
+   * finalizados aguantan minutos) para no repetir consultas al abrir la ficha.
+   * Devuelve null si la consulta falló y no había caché previa.
+   */
+  async fetchFootballMatchDetail(
+    rawMatchId: string | number,
+    token: string,
+    force = false
+  ): Promise<FootballMatchDetail | null> {
+    const key = String(rawMatchId);
+    const cached = FOOTBALL_DETAIL_CACHE.get(key);
+    const now = Date.now();
 
-    if (isWeb) {
-      try {
-        const proxyUrl = `/api/proxy/football?token=${encodeURIComponent(cleanToken)}&path=${encodeURIComponent(path)}`;
-        const res = await fetch(proxyUrl);
-        if (res.ok) data = await res.json();
-      } catch (proxyErr) {
-        console.warn('Proxy local Football-Data (goles) falló:', proxyErr);
-      }
+    if (!force && cached) {
+      const ttl = cached.live ? FOOTBALL_DETAIL_LIVE_TTL_MS : FOOTBALL_DETAIL_STATIC_TTL_MS;
+      if (now - cached.ts < ttl) return cached.detail;
     }
 
-    if (!data) {
-      try {
-        const res = await fetch(`https://api.football-data.org${path}`, {
-          headers: { 'X-Auth-Token': cleanToken, Accept: 'application/json' },
-        });
-        if (res.ok) data = await res.json();
-      } catch (directErr) {
-        console.warn('Llamada directa Football-Data (goles) falló:', directErr);
-      }
-    }
+    const data = await requestFootballMatchDetail(rawMatchId, token);
+    if (!data) return cached ? cached.detail : null;
 
-    if (!data || !Array.isArray(data.goals)) return null;
-
-    const homeId = data.homeTeam?.id;
-    const awayId = data.awayTeam?.id;
-    const goals: MatchGoal[] = [];
-    for (const g of data.goals) {
-      if (typeof g?.minute !== 'number') continue;
-      const teamId = g.team?.id;
-      goals.push({
-        minute: g.minute,
-        injuryTime: typeof g.injuryTime === 'number' ? g.injuryTime : null,
-        scorer: g.scorer?.name,
-        assist: g.assist?.name,
-        type: g.type,
-        team: teamId && homeId && teamId === homeId ? 'A' : teamId && awayId && teamId === awayId ? 'B' : undefined,
-        scoreA: typeof g.score?.home === 'number' ? g.score.home : undefined,
-        scoreB: typeof g.score?.away === 'number' ? g.score.away : undefined,
-      });
+    const detail = mapFootballMatchDetail(data);
+    const live = data.status === 'IN_PLAY' || data.status === 'PAUSED';
+    FOOTBALL_DETAIL_CACHE.set(key, { ts: now, live, detail });
+    if (FOOTBALL_DETAIL_CACHE.size > 120) {
+      const oldest = FOOTBALL_DETAIL_CACHE.keys().next().value;
+      if (oldest) FOOTBALL_DETAIL_CACHE.delete(oldest);
     }
-    return goals;
+    return detail;
   },
 
   /**

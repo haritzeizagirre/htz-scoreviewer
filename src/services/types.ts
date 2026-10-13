@@ -183,6 +183,81 @@ export interface MatchGoal {
   scoreB?: number | string;
 }
 
+/** Amonestación o expulsión de un partido de fútbol (Football-Data). */
+export interface FootballBooking {
+  minute: number;
+  injuryTime?: number | null;
+  /** YELLOW | RED | YELLOW_RED (segunda amarilla). */
+  card: 'YELLOW' | 'RED' | 'YELLOW_RED';
+  player?: string;
+  team?: 'A' | 'B';
+}
+
+/** Sustitución de un partido de fútbol (Football-Data). */
+export interface FootballSubstitution {
+  minute: number;
+  injuryTime?: number | null;
+  playerIn?: string;
+  playerOut?: string;
+  team?: 'A' | 'B';
+}
+
+/** Jugador de la alineación titular o del banquillo (Football-Data). */
+export interface FootballLineupPlayer {
+  id?: number | string;
+  name: string;
+  position?: string;
+  shirtNumber?: number | null;
+}
+
+/** Alineación, banquillo, entrenador y dibujo de un equipo (Football-Data). */
+export interface FootballTeamLineup {
+  formation?: string;
+  coach?: string;
+  starters: FootballLineupPlayer[];
+  bench: FootballLineupPlayer[];
+}
+
+/** Comparativa de estadísticas de equipo del partido (Football-Data). */
+export interface FootballTeamStats {
+  ballPossession?: number;
+  shots?: number;
+  shotsOnGoal?: number;
+  shotsOffGoal?: number;
+  fouls?: number;
+  cornerKicks?: number;
+  offsides?: number;
+  saves?: number;
+  yellowCards?: number;
+  redCards?: number;
+}
+
+/**
+ * Detalle ampliado de un partido de fútbol (`/v4/matches/{id}`): minuto de
+ * juego, cronología completa (goles, tarjetas y cambios), alineaciones y
+ * estadísticas de equipo. Es lo que alimenta la pestaña Stats de fútbol.
+ */
+export interface FootballMatchDetail {
+  /** Estado crudo de Football-Data (IN_PLAY | PAUSED | FINISHED...). */
+  status?: string;
+  minute?: number | null;
+  injuryTime?: number | null;
+  /** Marcador al descanso, si la fuente lo trae. */
+  halfTimeA?: number | null;
+  halfTimeB?: number | null;
+  /** REGULAR | EXTRA_TIME | PENALTY_SHOOTOUT */
+  duration?: string;
+  venue?: string;
+  referee?: string;
+  goals: MatchGoal[];
+  bookings: FootballBooking[];
+  substitutions: FootballSubstitution[];
+  lineupA?: FootballTeamLineup;
+  lineupB?: FootballTeamLineup;
+  statsA?: FootballTeamStats;
+  statsB?: FootballTeamStats;
+}
+
 export interface MatchTeam {
   id?: string | number;
   name: string;

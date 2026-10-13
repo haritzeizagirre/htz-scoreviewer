@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 import { getText as nativeGetText } from '../../modules/htz-http/src/HtzHttpModule';
-import { R6MatchData, R6MapData, R6PlayerStats, R6VetoRow } from './types';
+import { Match, R6MatchData, R6MapData, R6PlayerStats, R6VetoRow } from './types';
 
 // Memoria caché para evitar consultas redundantes a la web
 const R6_CACHE = new Map<string, R6MatchData>();
@@ -84,6 +84,17 @@ const GEZZLY_HEADERS = {
   'Upgrade-Insecure-Requests': '1',
 };
 
+/** `fetch` con límite de tiempo (evita cuelgues si la fuente no responde). */
+async function fetchWithTimeout(url: string, ms: number, init?: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...(init || {}), signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Fallback con `fetch`: reintenta si el cliente devuelve una respuesta
  * informacional (1xx, p. ej. 103 Early Hints) en lugar de la final.
@@ -91,7 +102,7 @@ const GEZZLY_HEADERS = {
 async function fetchGezzlyWithRetries(targetUrl: string, attempts = 3): Promise<string> {
   let lastStatus = 0;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const res = await fetch(targetUrl, { headers: GEZZLY_HEADERS });
+    const res = await fetchWithTimeout(targetUrl, 8000, { headers: GEZZLY_HEADERS });
     if (res.status >= 100 && res.status < 200) {
       lastStatus = res.status;
       await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
@@ -113,7 +124,7 @@ async function fetchGezzlyWithRetries(targetUrl: string, attempts = 3): Promise<
  */
 async function fetchGezzlyHtml(targetUrl: string): Promise<string> {
   if (Platform.OS === 'web') {
-    const res = await fetch(`/api/proxy/gezzly?url=${encodeURIComponent(targetUrl)}`);
+    const res = await fetchWithTimeout(`/api/proxy/gezzly?url=${encodeURIComponent(targetUrl)}`, 8000);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status} al conectar con Gezzly`);
     }
@@ -164,8 +175,10 @@ async function findMatchUrl(
             try {
               const html = await fetchGezzlyHtml(candidate);
               // Gezzly responde 200 incluso en URLs inexistentes ("soft 404"),
-              // con <title>Match Not Found - Gezzly</title>. Hay que descartarlo.
-              if (html && !/Match Not Found/i.test(html)) {
+              // con <title>Match Not Found - Gezzly</title>. Hay que descartarlo
+              // mirando el título (el texto "Match not found" también aparece en
+              // un componente del payload de las fichas reales).
+              if (html && !isGezzlyNotFound(html)) {
                 return candidate;
               }
             } catch {
@@ -545,6 +558,302 @@ function parseGezzlyMatchHtml(
   };
 }
 
+/**
+ * Mapa de Gezzly con su marcador de rondas, ya orientado a teamA/teamB del
+ * partido de la app (no al "home/away" de la web).
+ */
+export interface GezzlyMapScore {
+  order: number;
+  name: string;
+  /** Rondas del equipo A del partido (undefined si la fuente no las trae). */
+  scoreA?: number;
+  scoreB?: number;
+  /** Estado en Gezzly: "played" | "live" | "upcoming" | ... */
+  state: string;
+}
+
+/** Variantes de slug de un equipo para construir URLs de Gezzly. */
+function teamSlugVariants(name: string): string[] {
+  const slug = slugify(name);
+  if (!slug) return [];
+  const stripped = slug
+    .replace(/-(e-sports|esports|esport|gaming|team|club|academy)$/, '')
+    .replace(/^(team|club)-/, '');
+  const out: string[] = [slug];
+  if (stripped && stripped !== slug) out.push(stripped);
+  if (stripped && !out.includes(`team-${stripped}`)) out.push(`team-${stripped}`);
+  if (stripped && !out.includes(`${stripped}-esports`)) out.push(`${stripped}-esports`);
+  return out;
+}
+
+/** ¿El slug de un enlace de Gezzly contiene a este equipo? (compacto, tolerante). */
+function slugContainsTeam(linkSlug: string, variants: string[]): boolean {
+  const compact = linkSlug.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return variants.some((v) => {
+    const token = v.replace(/[^a-z0-9]/g, '');
+    return token.length >= 3 && compact.includes(token);
+  });
+}
+
+/** Primer enlace de un listado de Gezzly cuyos slugs cubren a los DOS equipos. */
+function pickListingMatchLink(html: string, variantsA: string[], variantsB: string[]): string | null {
+  const links = [...new Set([...html.matchAll(/href="(\/match\/[^"]+)"/g)].map((m) => m[1]))];
+  for (const link of links) {
+    const slug = link.replace(/^\/match\//, '');
+    if (slugContainsTeam(slug, variantsA) && slugContainsTeam(slug, variantsB)) return link;
+  }
+  return null;
+}
+
+// Caché breve de los listados de Gezzly (se comparten entre partidos de una
+// misma carga) y de la URL encontrada por partido (para no repetir búsquedas
+// en cada refresco).
+const GEZZLY_LISTING_CACHE = new Map<string, { html: string; at: number }>();
+const GEZZLY_LISTING_TTL_MS = 2 * 60_000;
+const GEZZLY_MATCH_URL_CACHE = new Map<string, { url: string | null; at: number }>();
+const GEZZLY_MATCH_URL_TTL_MS = 15 * 60_000;
+const GEZZLY_MATCH_URL_NEGATIVE_TTL_MS = 2 * 60_000;
+
+/** Evita solapar dos enriquecimientos R6 si se encadenan dos cargas. */
+let enrichInFlight = false;
+
+async function fetchGezzlyListing(url: string): Promise<string | null> {
+  const cached = GEZZLY_LISTING_CACHE.get(url);
+  if (cached && Date.now() - cached.at < GEZZLY_LISTING_TTL_MS) return cached.html;
+  try {
+    const html = await fetchGezzlyHtml(url);
+    GEZZLY_LISTING_CACHE.set(url, { html, at: Date.now() });
+    if (GEZZLY_LISTING_CACHE.size > 12) {
+      for (const key of [...GEZZLY_LISTING_CACHE.keys()].slice(0, 4)) {
+        GEZZLY_LISTING_CACHE.delete(key);
+      }
+    }
+    return html;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * URL del partido en Gezzly para el enriquecimiento en directo: primero busca en
+ * los listados (una descarga sirve para varios partidos) y, si no, prueba la URL
+ * directa ({equipoA}-{equipoB}-{fecha}, fechas contiguas).
+ */
+async function findLiveMatchUrl(
+  teamA: string,
+  teamB: string,
+  startTimeIso?: string
+): Promise<string | null> {
+  const cacheKey = `${teamA}|${teamB}|${startTimeIso || ''}`;
+  const cached = GEZZLY_MATCH_URL_CACHE.get(cacheKey);
+  if (cached) {
+    const ttl = cached.url ? GEZZLY_MATCH_URL_TTL_MS : GEZZLY_MATCH_URL_NEGATIVE_TTL_MS;
+    if (Date.now() - cached.at < ttl) return cached.url;
+  }
+
+  const variantsA = teamSlugVariants(teamA);
+  const variantsB = teamSlugVariants(teamB);
+  let found: string | null = null;
+
+  for (const listing of ['https://www.gezzly.gg/r6-live-scores', 'https://www.gezzly.gg/matches']) {
+    const html = await fetchGezzlyListing(listing);
+    if (!html) continue;
+    const link = pickListingMatchLink(html, variantsA, variantsB);
+    if (link) {
+      found = `https://www.gezzly.gg${link}`;
+      break;
+    }
+  }
+
+  if (!found && startTimeIso) {
+    const base = new Date(startTimeIso);
+    if (!isNaN(base.getTime())) {
+      const pairs: [string, string][] = [];
+      for (let i = 0; i < Math.min(variantsA.length, variantsB.length, 3); i++) {
+        pairs.push([variantsA[i], variantsB[i]]);
+      }
+      if (variantsA.length > 1 && variantsB.length > 1) pairs.push([variantsA[1], variantsB[0]]);
+
+      const dayMs = 24 * 3600 * 1000;
+      // Como máximo unos pocos intentos directos: si Gezzly no responde, no
+      // se lanzan decenas de peticiones seguidas (los listados ya fallaron).
+      let directAttempts = 0;
+      outer: for (const offset of [0, -1, 1]) {
+        const date = new Date(base.getTime() + offset * dayMs).toISOString().slice(0, 10);
+        for (const [a, b] of pairs.slice(0, 4)) {
+          if (directAttempts++ >= 4) break outer;
+          const candidate = `https://www.gezzly.gg/match/${a}-${b}-${date}`;
+          try {
+            const html = await fetchGezzlyHtml(candidate);
+            if (html && !isGezzlyNotFound(html)) {
+              found = candidate;
+              break outer;
+            }
+          } catch {
+            // URL no válida: probar la siguiente combinación
+          }
+        }
+      }
+    }
+  }
+
+  GEZZLY_MATCH_URL_CACHE.set(cacheKey, { url: found, at: Date.now() });
+  if (GEZZLY_MATCH_URL_CACHE.size > 60) {
+    for (const key of [...GEZZLY_MATCH_URL_CACHE.keys()].slice(0, 20)) {
+      GEZZLY_MATCH_URL_CACHE.delete(key);
+    }
+  }
+  return found;
+}
+
+/** Comparación compacta de nombres ("Black Dragons e-Sports" ≈ "Black Dragons"). */
+function namesAlike(a: string, b: string): boolean {
+  const ca = (a || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const cb = (b || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!ca || !cb) return false;
+  return ca === cb || ca.includes(cb) || cb.includes(ca);
+}
+
+/**
+ * La página "Match Not Found" de Gezzly se reconoce por su <title>: el texto
+ * "Match not found" también aparece en un componente del payload de las fichas
+ * reales, así que no vale buscarlo en todo el HTML.
+ */
+function isGezzlyNotFound(html: string): boolean {
+  const title = html.match(/<title>([\s\S]*?)<\/title>/)?.[1] || '';
+  return /Match Not Found/i.test(title);
+}
+
+/**
+ * Extrae los mapas (nombre, rondas y estado) del payload RSC de una ficha de
+ * Gezzly, orientando los marcadores a teamAName/teamBName.
+ */
+function parseGezzlyGames(
+  html: string,
+  teamAName: string,
+  teamBName: string
+): GezzlyMapScore[] | null {
+  if (isGezzlyNotFound(html)) return null;
+
+  // "HOME vs AWAY" del <title>, para saber qué lado de Gezzly es cada equipo.
+  let homeName = '';
+  let awayName = '';
+  const titleMatch = html.match(/<title>([\s\S]*?)<\/title>/);
+  if (titleMatch) {
+    const head = titleMatch[1].replace(/\s+/g, ' ').trim().split(' - ')[0];
+    const vsMatch = head.match(/^(.+?)\s+vs\.?\s+(.+?)(?:\s+(?:Result|Results|Preview|Live))?$/i);
+    if (vsMatch) {
+      homeName = vsMatch[1].trim();
+      awayName = vsMatch[2].trim();
+    }
+  }
+  const direct = namesAlike(homeName, teamAName) && namesAlike(awayName, teamBName);
+  const flipped = namesAlike(homeName, teamBName) && namesAlike(awayName, teamAName);
+  const homeIsTeamA = flipped && !direct ? false : true;
+
+  // Primer array "games" válido del payload (nombre + score + estado por mapa).
+  const payload = extractRscPayload(html);
+  let pos = 0;
+  let raw: any[] | null = null;
+  while (true) {
+    const found = extractArrayAfter(payload, '"games":[', pos);
+    if (!found) break;
+    pos = found.end;
+    try {
+      const arr = JSON.parse(found.json);
+      if (Array.isArray(arr) && arr.length > 0 && arr[0] && typeof arr[0].name === 'string') {
+        raw = arr;
+        break;
+      }
+    } catch {
+      // Array no parseable: continuar con el siguiente
+    }
+  }
+  if (!raw) return null;
+
+  const sorted = [...raw].sort((a, b) => (a?.order ?? 0) - (b?.order ?? 0));
+  const maps: GezzlyMapScore[] = [];
+  sorted.forEach((g, idx) => {
+    if (!g || typeof g.name !== 'string') return;
+    const home = Number(g.score?.home);
+    const away = Number(g.score?.away);
+    const homeScore = isNaN(home) ? undefined : home;
+    const awayScore = isNaN(away) ? undefined : away;
+    maps.push({
+      order: typeof g.order === 'number' ? g.order : idx + 1,
+      name: g.name,
+      state: String(g.state || ''),
+      scoreA: homeIsTeamA ? homeScore : awayScore,
+      scoreB: homeIsTeamA ? awayScore : homeScore,
+    });
+  });
+  return maps.length > 0 ? maps : null;
+}
+
+/**
+ * Descarga y parsea los mapas de un partido de R6 desde Gezzly. Devuelve null si
+ * el partido no está publicado o no se puede leer (se reintenta en la siguiente
+ * carga).
+ */
+async function fetchGezzlyMapScores(
+  teamA: string,
+  teamB: string,
+  startTimeIso?: string
+): Promise<GezzlyMapScore[] | null> {
+  const url = await findLiveMatchUrl(teamA, teamB, startTimeIso);
+  if (!url) return null;
+  try {
+    const html = await fetchGezzlyHtml(url);
+    return parseGezzlyGames(html, teamA, teamB);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Aplica los marcadores de Gezzly al partido: rondas y nombre real de cada mapa
+ * en el desglose, estado (jugado / en juego) y tanteo del mapa en curso.
+ */
+function applyGezzlyMapsToMatch(match: Match, maps: GezzlyMapScore[]): void {
+  const breakdown = match.details?.gamesBreakdown;
+  if (breakdown) {
+    for (const map of maps) {
+      const entry = breakdown.find((g) => g.position === map.order);
+      if (!entry) continue;
+      if (map.name) entry.mapName = map.name;
+      if (typeof map.scoreA === 'number') entry.scoreA = map.scoreA;
+      if (typeof map.scoreB === 'number') entry.scoreB = map.scoreB;
+      if (map.state === 'played') {
+        if (entry.status !== 'finished') entry.status = 'finished';
+        if (
+          !entry.winnerTeam &&
+          typeof map.scoreA === 'number' &&
+          typeof map.scoreB === 'number' &&
+          map.scoreA !== map.scoreB
+        ) {
+          entry.winnerTeam = map.scoreA > map.scoreB ? 'A' : 'B';
+        }
+      } else if (map.state === 'live' && entry.status === 'not_started') {
+        entry.status = 'running';
+      }
+    }
+  }
+
+  // Mapa en curso: tanteo REAL de rondas (PandaScore no lo trae en R6; sin esto
+  // la insignia mostraba el marcador de la serie, "1-0", como si fueran rondas).
+  const liveMap = maps.find((m) => m.state === 'live');
+  if (liveMap && typeof liveMap.scoreA === 'number' && typeof liveMap.scoreB === 'number') {
+    const label = liveMap.name || `Mapa ${liveMap.order}`;
+    match.liveRoundScore = {
+      scoreA: liveMap.scoreA,
+      scoreB: liveMap.scoreB,
+      mapName: liveMap.name || undefined,
+      mapNumber: liveMap.order,
+      roundOrTime: `${label}: ${liveMap.scoreA}-${liveMap.scoreB}`,
+    };
+  }
+}
+
 export const R6StatsService = {
   /**
    * Obtiene las estadísticas oficiales de un partido de R6 desde Gezzly
@@ -613,5 +922,41 @@ export const R6StatsService = {
   /** Motivo del último fallo, para diagnóstico. */
   getLastError(): string | null {
     return lastError;
+  },
+
+  /**
+   * Completa los marcadores de rondas (y el nombre real de cada mapa) de los
+   * partidos de R6 en directo/recientes desde Gezzly: PandaScore no publica
+   * `results` por mapa en R6 y sin esto la insignia en vivo y los avisos de
+   * "fin de mapa" mostraban el marcador de la serie ("1-0") y no las rondas
+   * ("7-0"). Se ejecuta en segundo plano y nunca bloquea la carga si falla.
+   */
+  async enrichR6Matches(matches: Match[]): Promise<void> {
+    if (enrichInFlight) return;
+    const now = Date.now();
+    const targets = matches.filter((m) => {
+      if (m.game !== 'R6') return false;
+      if (m.status === 'LIVE') return true;
+      if (m.status !== 'FINISHED') return false;
+      const start = new Date(m.startTimeIso).getTime();
+      return !isNaN(start) && now - start <= 3 * 3600 * 1000;
+    });
+    if (targets.length === 0) return;
+
+    enrichInFlight = true;
+    try {
+      await Promise.allSettled(
+        targets.slice(0, 6).map(async (m) => {
+          try {
+            const maps = await fetchGezzlyMapScores(m.teamA.name, m.teamB.name, m.startTimeIso);
+            if (maps && maps.length > 0) applyGezzlyMapsToMatch(m, maps);
+          } catch (err) {
+            console.warn('Enriquecimiento R6 (Gezzly) falló:', err);
+          }
+        })
+      );
+    } finally {
+      enrichInFlight = false;
+    }
   },
 };

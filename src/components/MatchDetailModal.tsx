@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   Modal,
   View,
@@ -22,19 +22,18 @@ import {
   Tv,
   ExternalLink,
   ArrowLeft,
-  RotateCcw,
   BarChart3,
   Info,
 } from 'lucide-react-native';
-import { FootballEvent, Match, MatchGoal, SportCategory } from '../services/types';
+import { Match, SportCategory } from '../services/types';
 import { formatMatchSchedule } from '../services/dateUtils';
 import { getCurrentMapNumber, isLiveRoundScoreFinished } from '../services/matchScoreUtils';
-import { getDefaultStreams, ScoreService } from '../services/scoreService';
+import { getDefaultStreams } from '../services/scoreService';
 import { VlrScoreboardView } from './VlrScoreboardView';
 import { R6ScoreboardView } from './R6ScoreboardView';
 import { LolPicksBansView } from './LolPicksBansView';
+import { FootballStatsView } from './FootballStatsView';
 import { MatchPreviewSection } from './MatchPreviewSection';
-import { GameLogo } from './GameLogo';
 import { MarqueeText } from './MarqueeText';
 import {
   HtzCard,
@@ -58,9 +57,13 @@ interface MatchDetailModalProps {
   ) => void;
 }
 
-/** Juegos con pestaña de estadísticas dedicada (gol.gg / VLR / R6). */
+/**
+ * Juegos con pestaña de estadísticas dedicada (gol.gg / VLR / R6 / Football-Data).
+ * El fútbol también la tiene: minuto, cronología completa (goles, tarjetas y
+ * cambios), estadísticas de equipo y alineaciones.
+ */
 function gameHasStats(game?: SportCategory): boolean {
-  return game === 'LOL' || game === 'R6' || game === 'VALORANT';
+  return game === 'LOL' || game === 'R6' || game === 'VALORANT' || game === 'FÚTBOL';
 }
 
 /** Pestaña que se muestra al abrir un partido: Stats si existe, si no el calendario/eventos. */
@@ -76,74 +79,23 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
   footballToken,
   onSelectTournament,
 }) => {
-  const [activeTab, setActiveTab] = useState<string>(defaultTabForGame(match?.game));
-  // Goles consultados al abrir la ficha (fútbol): la cronología real se pide una
-  // sola vez por partido y solo si el partido no trae ya goles.
-  const [fetchedGoals, setFetchedGoals] = useState<{ matchId: string; goals: MatchGoal[] } | null>(
-    null
-  );
+  // Pestaña activa: al cambiar de partido se reinicia a la de por defecto
+  // (Stats si el juego tiene estadísticas, si no el calendario/mapas) sin
+  // depender de un efecto. El modal no se desmonta entre partidos, así que la
+  // pestaña elegida se guarda junto al id del partido al que pertenece.
+  const [tabState, setTabState] = useState<{ matchId?: string; tab: string }>({
+    matchId: match?.id,
+    tab: defaultTabForGame(match?.game),
+  });
+  const activeTab = tabState.matchId === match?.id ? tabState.tab : defaultTabForGame(match?.game);
+  const setActiveTab = (tab: string) => setTabState({ matchId: match?.id, tab });
   // El modal es full-screen y queda fuera del SafeAreaView, así que respetamos
   // el notch/barra de estado manualmente para que el header no se solape.
   const insets = useSafeAreaInsets();
 
-  // Al abrir un partido, mostrar siempre primero la pestaña de estadísticas
-  // (o el calendario/eventos en los juegos que no tienen stats).
-  useEffect(() => {
-    if (!match) return;
-    setActiveTab(defaultTabForGame(match.game));
-  }, [match?.id, match?.game]);
-
-  useEffect(() => {
-    if (!match || match.game !== 'FÚTBOL' || !footballToken) return;
-    if (match.details?.goals && match.details.goals.length > 0) return;
-    let cancelled = false;
-    (async () => {
-      const goals = await ScoreService.fetchFootballMatchGoals(
-        match.id.replace(/^foot-/, ''),
-        footballToken
-      );
-      if (!cancelled && goals && goals.length > 0) {
-        setFetchedGoals({ matchId: match.id, goals });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [match?.id, match?.game, footballToken]);
-
   if (!match) return null;
 
   const schedule = formatMatchSchedule(match.startTimeIso, match.status, match.timeInfo);
-
-  // Cronología de fútbol: goles reales (los que traiga el partido o los
-  // consultados al abrir esta ficha); si no hay, los eventos disponibles.
-  const footballGoals: MatchGoal[] =
-    match.details?.goals && match.details.goals.length > 0
-      ? match.details.goals
-      : fetchedGoals && fetchedGoals.matchId === match.id
-      ? fetchedGoals.goals
-      : [];
-  const footballTimeline: FootballEvent[] =
-    match.game === 'FÚTBOL'
-      ? footballGoals.length > 0
-        ? footballGoals.map((g) => ({
-            minute: g.minute,
-            type: 'goal' as const,
-            team: g.team ?? 'A',
-            player: g.scorer || 'Gol',
-            detail: [
-              g.type === 'PENALTY' ? 'Penalti' : g.type === 'OWN_GOAL' ? 'En propia puerta' : undefined,
-              g.injuryTime ? `Min. ${g.minute}+${g.injuryTime}` : undefined,
-              g.assist ? `Asistencia de ${g.assist}` : undefined,
-              typeof g.scoreA === 'number' && typeof g.scoreB === 'number'
-                ? `(${g.scoreA}-${g.scoreB})`
-                : undefined,
-            ]
-              .filter(Boolean)
-              .join(' · '),
-          }))
-        : match.details?.footballEvents ?? []
-      : [];
 
   const tabs: TabItem[] = [
     ...(gameHasStats(match.game)
@@ -516,59 +468,17 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
               </View>
             )}
 
-            {/* 2. MAPAS O EVENTOS */}
+            {/* 2. MAPAS (solo juegos sin pestaña de estadísticas propia) */}
             {activeTab === 'mapas' && (
               <View style={styles.tabContent}>
-                {match.game === 'FÚTBOL' ? (
-                  // Timeline de Fútbol
-                  <View>
-                    <Text style={styles.sectionHeader}>Cronología del Partido</Text>
-                    {footballTimeline.length > 0 ? (
-                      <View style={styles.timelineList}>
-                        {footballTimeline.map((evt, idx) => (
-                          <View key={`event-${idx}`} style={styles.timelineItem}>
-                            <View style={styles.minutePill}>
-                              <Text style={styles.minuteText}>{evt.minute}&apos;</Text>
-                            </View>
-                            <View style={styles.eventIconContainer}>
-                              {evt.type === 'goal' && <GameLogo game="FÚTBOL" size={15} />}
-                              {evt.type === 'card_yellow' && <View style={styles.yellowCard} />}
-                              {evt.type === 'card_red' && <View style={styles.redCard} />}
-                              {evt.type === 'sub' && <RotateCcw size={13} color="#60A5FA" />}
-                            </View>
-                            <View style={styles.eventDetails}>
-                              <Text style={styles.eventPlayer}>{evt.player}</Text>
-                              {evt.detail && <Text style={styles.eventSubDetail}>{evt.detail}</Text>}
-                            </View>
-                            <View style={styles.eventTeamBadge}>
-                              <Text style={styles.eventTeamText}>
-                                {evt.team === 'A' ? match.teamA.shortName : match.teamB.shortName}
-                              </Text>
-                            </View>
-                          </View>
-                        ))}
-                      </View>
-                    ) : (
-                      <HtzCard style={styles.emptyCard}>
-                        <Clock size={28} color={htzTokens.colors.outline} />
-                        <Text style={styles.emptyTitle}>Sin eventos registrados todavía</Text>
-                        <Text style={styles.emptySubtitle}>
-                          {match.status === 'UPCOMING'
-                            ? 'Los goles, amonestaciones y sustituciones aparecerán en directo al comenzar el encuentro.'
-                            : 'No se registraron incidencias en este partido.'}
-                        </Text>
-                      </HtzCard>
-                    )}
-                  </View>
-                ) : (
-                  // Desglose de Mapas para Esports
-                  <View>
-                    <Text style={styles.sectionHeader}>
-                      Desglose de Partidas ({bestOf ? `BO${bestOf}` : 'Mapas'})
-                    </Text>
-                    {match.details?.gamesBreakdown && match.details.gamesBreakdown.length > 0 ? (
-                      <View style={{ gap: 10 }}>
-                        {match.details.gamesBreakdown.map((g, idx) => {
+                {/* Desglose de Mapas para Esports */}
+                <View>
+                  <Text style={styles.sectionHeader}>
+                    Desglose de Partidas ({bestOf ? `BO${bestOf}` : 'Mapas'})
+                  </Text>
+                  {match.details?.gamesBreakdown && match.details.gamesBreakdown.length > 0 ? (
+                    <View style={{ gap: 10 }}>
+                      {match.details.gamesBreakdown.map((g, idx) => {
                           const isFinished = g.status === 'finished';
                           const isRunning = g.status === 'running';
                           const winnerName =
@@ -649,7 +559,6 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
                       </HtzCard>
                     )}
                   </View>
-                )}
               </View>
             )}
 
@@ -680,6 +589,9 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
                     startTimeIso={match.startTimeIso}
                     leagueName={`${match.league} ${match.details?.tournamentStage || ''}`.trim()}
                   />
+                )}
+                {match.game === 'FÚTBOL' && (
+                  <FootballStatsView match={match} footballToken={footballToken} />
                 )}
               </View>
             )}
@@ -918,71 +830,6 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
     color: htzTokens.colors.outline,
     fontSize: 10,
     marginTop: 2,
-  },
-  timelineList: {
-    gap: 8,
-  },
-  timelineItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: htzTokens.colors.surface,
-    padding: 12,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: htzTokens.colors.outline,
-  },
-  minutePill: {
-    backgroundColor: htzTokens.colors.surfaceVariant,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-    marginRight: 10,
-  },
-  minuteText: {
-    color: htzTokens.colors.primary,
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  eventIconContainer: {
-    width: 24,
-    alignItems: 'center',
-    marginRight: 10,
-  },
-  yellowCard: {
-    width: 12,
-    height: 16,
-    backgroundColor: '#FBBF24',
-    borderRadius: 2,
-  },
-  redCard: {
-    width: 12,
-    height: 16,
-    backgroundColor: '#EF4444',
-    borderRadius: 2,
-  },
-  eventDetails: {
-    flex: 1,
-  },
-  eventPlayer: {
-    color: htzTokens.colors.onSurface,
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  eventSubDetail: {
-    color: htzTokens.colors.outline,
-    fontSize: 11,
-    marginTop: 2,
-  },
-  eventTeamBadge: {
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  eventTeamText: {
-    color: htzTokens.colors.outline,
-    fontSize: 11,
-    fontWeight: '700',
   },
   mapCard: {
     backgroundColor: htzTokens.colors.surface,
