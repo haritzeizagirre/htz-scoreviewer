@@ -190,6 +190,48 @@ config.server = {
         return;
       }
 
+      // FotMob (stats de fútbol: minuto, goles, tarjetas, cambios y alineaciones)
+      if (req.url && req.url.startsWith('/api/proxy/fotmob')) {
+        const parsedUrl = new URL(req.url, 'http://localhost:8081');
+        const targetUrl = parsedUrl.searchParams.get('url') || 'https://www.fotmob.com/api/data/matches';
+        let parsedTarget;
+        try {
+          parsedTarget = new URL(targetUrl);
+        } catch {
+          parsedTarget = new URL('https://www.fotmob.com' + targetUrl);
+        }
+
+        const options = {
+          hostname: parsedTarget.hostname,
+          port: 443,
+          path: parsedTarget.pathname + parsedTarget.search,
+          method: 'GET',
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36',
+            Accept: 'application/json',
+            'Accept-Encoding': 'identity',
+          },
+        };
+
+        const proxyReq = https.request(options, (proxyRes) => {
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+          res.setHeader('Content-Type', proxyRes.headers['content-type'] || 'application/json; charset=utf-8');
+          res.statusCode = proxyRes.statusCode || 200;
+          proxyRes.pipe(res);
+        });
+
+        proxyReq.on('error', (err) => {
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          res.setHeader('Content-Type', 'application/json');
+          res.statusCode = 502;
+          res.end(JSON.stringify({ error: err.message }));
+        });
+
+        proxyReq.end();
+        return;
+      }
+
       // Generic CDN proxy endpoint (CommunityDragon / Data Dragon para iconos) en web
       if (req.url && req.url.startsWith('/api/proxy/cdn')) {
         const parsedUrl = new URL(req.url, 'http://localhost:8081');

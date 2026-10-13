@@ -13,6 +13,7 @@ import {
   PlayerInfo,
 } from '../services/types';
 import { ScoreService } from '../services/scoreService';
+import { FootballStatsService } from '../services/footballStatsService';
 import { formatMatchSchedule } from '../services/dateUtils';
 import { HtzCard } from './htz';
 import { htzTokens } from './htz/tokens';
@@ -277,7 +278,7 @@ const TeamLineupCard: React.FC<{
           </Text>
         </>
       ) : (
-        <Text style={styles.lineupEmpty}>Alineación no publicada todavía.</Text>
+        <Text style={styles.lineupEmpty}>Alineación no disponible todavía.</Text>
       )}
     </HtzCard>
   );
@@ -286,13 +287,17 @@ const TeamLineupCard: React.FC<{
 /**
  * Pestaña "Stats" de fútbol: minuto de juego, cronología completa (goles,
  * amarillas, rojas y cambios), comparativa de estadísticas y alineaciones.
- * Se alimenta de `/v4/matches/{id}` de Football-Data y, si no hay token o la
- * consulta falla, cae a los datos que ya venga en el partido (goles/plantilla).
+ *
+ * Fuente principal: FotMob (sin clave, con minuto/eventos/alineaciones reales).
+ * Respaldo: detalle de Football-Data (`/v4/matches/{id}`), útil sobre todo con
+ * planes de pago, porque el gratuito no incluye eventos ni alineaciones.
+ * Si no hay fuente, cae a los datos que ya traiga el partido (demo).
  */
 export const FootballStatsView: React.FC<FootballStatsViewProps> = ({ match, footballToken }) => {
   const rawId = match.id.replace(/^foot-/, '');
   const hasNumericId = /^\d+$/.test(rawId);
-  const canFetch = Boolean(footballToken && footballToken.trim().length > 5 && hasNumericId);
+  // FotMob no necesita token: cualquier partido real puede consultarse.
+  const canFetch = hasNumericId;
 
   const [loaded, setLoaded] = useState<{
     matchId: string;
@@ -308,11 +313,13 @@ export const FootballStatsView: React.FC<FootballStatsViewProps> = ({ match, foo
     if (!canFetch) return;
     let cancelled = false;
     (async () => {
-      const detail = await ScoreService.fetchFootballMatchDetail(
-        rawId,
-        footballToken!,
-        reloadNonce > 0
-      );
+      const force = reloadNonce > 0;
+      // 1) FotMob: minuto, goles, tarjetas, cambios, alineaciones y stats.
+      let detail = await FootballStatsService.getMatchDetail(match, force);
+      // 2) Respaldo: detalle de Football-Data (planes de pago traen eventos).
+      if (!detail && footballToken && footballToken.trim().length > 5) {
+        detail = await ScoreService.fetchFootballMatchDetail(rawId, footballToken, force);
+      }
       if (cancelled) return;
       setLoaded({
         matchId: match.id,
@@ -324,7 +331,7 @@ export const FootballStatsView: React.FC<FootballStatsViewProps> = ({ match, foo
     return () => {
       cancelled = true;
     };
-  }, [canFetch, rawId, match.id, footballToken, reloadNonce]);
+  }, [canFetch, rawId, match, footballToken, reloadNonce]);
 
   const loading = canFetch && !loadedForMatch;
   const detail = loadedForMatch?.detail ?? null;
@@ -337,7 +344,7 @@ export const FootballStatsView: React.FC<FootballStatsViewProps> = ({ match, foo
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="small" color={htzTokens.colors.primary} />
         <Text style={styles.loadingText}>
-          Consultando minuto, eventos y alineaciones en Football-Data...
+          Consultando minuto, eventos y alineaciones...
         </Text>
       </View>
     );
@@ -359,8 +366,14 @@ export const FootballStatsView: React.FC<FootballStatsViewProps> = ({ match, foo
 
   const lineupA = detail?.lineupA;
   const lineupB = detail?.lineupB;
-  const fallbackA = match.teamA.players || match.details?.rosterA?.players || [];
-  const fallbackB = match.teamB.players || match.details?.rosterB?.players || [];
+  // Los rosters "conocidos" (semilla) solo valen para los partidos de demo: en
+  // partidos reales, si la fuente no publica alineación, se dice y ya está.
+  const fallbackA = hasNumericId
+    ? []
+    : match.teamA.players || match.details?.rosterA?.players || [];
+  const fallbackB = hasNumericId
+    ? []
+    : match.teamB.players || match.details?.rosterB?.players || [];
 
   // Estado/minuto del partido (el detalle manda; si no, lo que sepa el partido).
   const schedule = formatMatchSchedule(match.startTimeIso, match.status, match.timeInfo);
@@ -424,17 +437,6 @@ export const FootballStatsView: React.FC<FootballStatsViewProps> = ({ match, foo
         </View>
         {statusMeta ? <Text style={styles.statusMeta}>{statusMeta}</Text> : null}
       </HtzCard>
-
-      {/* Aviso cuando no hay token configurado (partidos reales, no demo) */}
-      {hasNumericId && !canFetch ? (
-        <View style={styles.notice}>
-          <AlertTriangle size={13} color="#FBBF24" />
-          <Text style={styles.noticeText}>
-            Añade tu token de Football-Data en Ajustes para ver goles, tarjetas, cambios y
-            alineaciones en directo.
-          </Text>
-        </View>
-      ) : null}
 
       {/* Aviso de error de la fuente con opción de reintentar */}
       {fetchError && (

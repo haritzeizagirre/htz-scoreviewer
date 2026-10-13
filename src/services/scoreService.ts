@@ -27,6 +27,7 @@ import {
 } from './types';
 import { formatMatchSchedule } from './dateUtils';
 import { R6StatsService } from './r6StatsService';
+import { FootballStatsService } from './footballStatsService';
 
 // Margen máximo (en horas) para mostrar partidos finalizados en la pantalla principal.
 // Evita que se cuelen resultados de hace casi una semana en "Finalizados".
@@ -3307,6 +3308,13 @@ export const ScoreService = {
     // marcador de la serie ("1-0"). Si Gezzly falla, la carga sigue igual.
     if (combined.some((m) => m.game === 'R6')) {
       await R6StatsService.enrichR6Matches(combined);
+    }
+
+    // Fútbol: el plan gratuito de Football-Data va con retraso y no trae el
+    // minuto de juego; FotMob completa minuto y marcador real de los partidos
+    // en vivo (una sola consulta al día, cacheada). Si falla, no se toca nada.
+    if (combined.some((m) => m.game === 'FÚTBOL' && m.status === 'LIVE')) {
+      await FootballStatsService.enrichFootballMatches(combined);
     }
 
     // Para cualquier otro partido en directo de esports con mapas en juego,
