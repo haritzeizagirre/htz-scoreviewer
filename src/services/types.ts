@@ -57,6 +57,8 @@ export type NotificationEventKey =
   | 'goal' // Gol (fútbol)
   | 'halfTime' // Descanso (fútbol)
   | 'fullTime' // Final del partido (fútbol)
+  | 'redCard' // Roja / segunda amarilla (fútbol)
+  | 'goalCancelled' // Gol anulado por el VAR (fútbol)
   | 'mapEnd' // Fin de mapa/juego (esports)
   | 'seriesEnd' // Resultado final de serie (esports)
   | 'reminder'; // Recordatorio previo
@@ -67,6 +69,8 @@ export interface NotificationEventPrefs {
   goal: boolean;
   halfTime: boolean;
   fullTime: boolean;
+  redCard: boolean;
+  goalCancelled: boolean;
   mapEnd: boolean;
   seriesEnd: boolean;
   reminder: boolean;
@@ -168,7 +172,7 @@ export interface FootballEvent {
   detail?: string;
 }
 
-/** Gol real de un partido de fútbol (Football-Data). */
+/** Gol real de un partido de fútbol, con goleador y minuto. */
 export interface MatchGoal {
   /** Minuto reglamentario (sin el tiempo añadido). */
   minute: number;
@@ -183,7 +187,7 @@ export interface MatchGoal {
   scoreB?: number | string;
 }
 
-/** Amonestación o expulsión de un partido de fútbol (Football-Data). */
+/** Amonestación o expulsión de un partido de fútbol. */
 export interface FootballBooking {
   minute: number;
   injuryTime?: number | null;
@@ -191,6 +195,18 @@ export interface FootballBooking {
   card: 'YELLOW' | 'RED' | 'YELLOW_RED';
   player?: string;
   team?: 'A' | 'B';
+}
+
+/**
+ * Gol anulado por el VAR. `key` es estable en la fuente (id del evento) para no
+ * repetir el aviso entre cargas.
+ */
+export interface FootballGoalCancel {
+  minute: number;
+  injuryTime?: number | null;
+  player?: string;
+  team?: 'A' | 'B';
+  key: string;
 }
 
 /** Sustitución de un partido de fútbol (Football-Data). */
@@ -252,6 +268,8 @@ export interface FootballMatchDetail {
   goals: MatchGoal[];
   bookings: FootballBooking[];
   substitutions: FootballSubstitution[];
+  /** Goles anulados por el VAR (FotMob), para las alertas. */
+  goalCancels?: FootballGoalCancel[];
   lineupA?: FootballTeamLineup;
   lineupB?: FootballTeamLineup;
   statsA?: FootballTeamStats;
@@ -312,8 +330,12 @@ export interface Match {
     rosterB?: TeamRoster;
     h2hData?: MatchH2H;
     footballEvents?: FootballEvent[];
-    /** Goles reales consultados a Football-Data (para alertas y cronología). */
+    /** Goles reales consultados a la fuente de incidencias (para alertas y cronología). */
     goals?: MatchGoal[];
+    /** Rojas / segundas amarillas (para las alertas). */
+    redCards?: FootballBooking[];
+    /** Goles anulados por el VAR (para las alertas). */
+    goalCancels?: FootballGoalCancel[];
     broadcastTv?: string[];
   };
 }

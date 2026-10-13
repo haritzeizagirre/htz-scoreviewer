@@ -14,6 +14,7 @@
  *   no aportan nada. Los resultados finales sí se avisan siempre.
  */
 import {
+  FootballBooking,
   Match,
   MatchGoal,
   MatchStatus,
@@ -34,6 +35,8 @@ export interface MatchSnapshot {
     number,
     { mapName: string; winner?: 'A' | 'B'; scoreA?: number | string; scoreB?: number | string }
   >;
+  /** Claves de incidencias ya vistas (rojas, goles anulados): evita repetir avisos. */
+  incidents?: string[];
   /** Momento (epoch ms) en que se tomó esta foto; evita avisos tardíos. */
   seenAt?: number;
 }
@@ -63,6 +66,11 @@ function toNum(value: number | string): number | null {
   return isNaN(n) ? null : n;
 }
 
+/** Clave estable de una roja / segunda amarilla (para no repetir el aviso). */
+export function redCardKey(b: FootballBooking): string {
+  return `red:${b.minute}+${b.injuryTime || 0}:${b.player || '?'}`;
+}
+
 export function toMatchSnapshot(m: Match, nowMs: number = Date.now()): MatchSnapshot {
   const finishedMaps: MatchSnapshot['finishedMaps'] = {};
   for (const g of m.details?.gamesBreakdown || []) {
@@ -75,12 +83,17 @@ export function toMatchSnapshot(m: Match, nowMs: number = Date.now()): MatchSnap
       };
     }
   }
+  const incidents = [
+    ...(m.details?.redCards || []).map(redCardKey),
+    ...(m.details?.goalCancels || []).map((c) => c.key),
+  ];
   return {
     status: m.status,
     scoreA: m.teamA.score,
     scoreB: m.teamB.score,
     roundOrTime: m.liveRoundScore?.roundOrTime,
     finishedMaps,
+    incidents,
     seenAt: nowMs,
   };
 }
@@ -149,7 +162,12 @@ export function diffMatchEvents(
     if (nA !== null && nB !== null && pA !== null && pB !== null && (nA > pA || nB > pB)) {
       const minute = match.liveRoundScore?.roundOrTime ? ` · ${match.liveRoundScore.roundOrTime}` : '';
       const goals = match.details?.goals || [];
-      const latestGoal = goals.length > 0 ? goals[goals.length - 1] : undefined;
+      // El gol nuevo es el último cuyo acumulado coincide con el marcador
+      // actual: si la fuente va un gol por detrás, no se anuncia el anterior.
+      const matching = goals.filter(
+        (g) => toNum(g.scoreA ?? '') === nA && toNum(g.scoreB ?? '') === nB
+      );
+      const latestGoal = matching.length > 0 ? matching[matching.length - 1] : goals[goals.length - 1];
       const scorer = latestGoal?.scorer?.trim();
       if (scorer && latestGoal) {
         const goalType = (latestGoal.type || '').toUpperCase();
@@ -178,7 +196,42 @@ export function diffMatchEvents(
     }
   }
 
-  // 3. Descanso (fútbol)
+  // 3. Roja / segunda amarilla (fútbol): se avisa cuando aparece una nueva
+  //    incidencia que no estaba en la foto anterior.
+  if (isFootball && prefs.redCard && liveFresh && match.status === 'LIVE' && prev.status === 'LIVE') {
+    const seen = new Set(prev.incidents || []);
+    for (const red of match.details?.redCards || []) {
+      const key = redCardKey(red);
+      if (seen.has(key)) continue;
+      const player = red.player || 'Jugador';
+      const label = red.card === 'YELLOW_RED' ? 'Segunda amarilla' : 'Roja directa';
+      out.push({
+        dedupeKey: `${match.id}:red:${key}`,
+        event: 'redCard',
+        game: match.game,
+        title: `${label}: ${player} (${red.minute}${red.injuryTime ? `+${red.injuryTime}` : ''}')`,
+        body: `${shortA} ${match.teamA.score}-${match.teamB.score} ${shortB} · ${league}`,
+      });
+    }
+  }
+
+  // 4. Gol anulado por el VAR (fútbol): igual que las rojas, solo la primera vez.
+  if (isFootball && prefs.goalCancelled && liveFresh && match.status === 'LIVE' && prev.status === 'LIVE') {
+    const seen = new Set(prev.incidents || []);
+    for (const cancel of match.details?.goalCancels || []) {
+      if (seen.has(cancel.key)) continue;
+      const who = cancel.player ? `: ${cancel.player}` : '';
+      out.push({
+        dedupeKey: `${match.id}:cancel:${cancel.key}`,
+        event: 'goalCancelled',
+        game: match.game,
+        title: `Gol anulado${who} (${cancel.minute}${cancel.injuryTime ? `+${cancel.injuryTime}` : ''}')`,
+        body: `${shortA} ${match.teamA.score}-${match.teamB.score} ${shortB} · ${league}`,
+      });
+    }
+  }
+
+  // 5. Descanso (fútbol)
   if (isFootball && prefs.halfTime && liveFresh && match.status === 'LIVE' && prev.status === 'LIVE') {
     const nowHalf = (match.liveRoundScore?.roundOrTime || '').toLowerCase().includes('descanso');
     const wasHalf = (prev.roundOrTime || '').toLowerCase().includes('descanso');
@@ -193,7 +246,7 @@ export function diffMatchEvents(
     }
   }
 
-  // 4. Fin de mapa/juego (esports), con el marcador de ESE mapa si se conoce.
+  // 6. Fin de mapa/juego (esports), con el marcador de ESE mapa si se conoce.
   if (!isFootball && prefs.mapEnd && liveFresh) {
     for (const g of match.details?.gamesBreakdown || []) {
       if (g.status === 'finished' && !prev.finishedMaps[g.position]) {
@@ -213,7 +266,7 @@ export function diffMatchEvents(
     }
   }
 
-  // 5. Final (fútbol) / resultado de serie (esports)
+  // 7. Final (fútbol) / resultado de serie (esports)
   if (prev.status !== 'FINISHED' && match.status === 'FINISHED') {
     if (isFootball && prefs.fullTime) {
       out.push({

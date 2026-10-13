@@ -11,6 +11,8 @@ const MAP = {
   ic_notif_goal: 'sports_soccer',
   ic_notif_halftime: 'pause_circle',
   ic_notif_fulltime: 'scoreboard',
+  ic_notif_redcard: 'rectangle',
+  ic_notif_goal_cancelled: 'cancel',
   ic_notif_map: 'map',
   ic_notif_series: 'emoji_events',
   ic_notif_reminder: 'alarm',

@@ -49,7 +49,6 @@ import {
   TournamentItem,
   TeamCatalogItem,
   MatchSourceStatus,
-  MatchGoal,
   NotificationEventPrefs,
   NotificationSettings,
 } from './services/types';
@@ -66,6 +65,7 @@ import {
 } from './services/notificationEngine';
 import { AppNotifications } from './services/notificationService';
 import { PushService } from './services/pushService';
+import { FootballStatsService } from './services/footballStatsService';
 import { NotificationsModal } from './components/NotificationsModal';
 import { MatchGroup } from './components/MatchGroup';
 import { MatchDetailModal } from './components/MatchDetailModal';
@@ -264,8 +264,6 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   const notifiedEventsRef = useRef<Set<string>>(new Set());
   const remindedEventsRef = useRef<Set<string>>(new Set());
   const notifEngineReadyRef = useRef(false);
-  // Goles reales por partido+marcador ("id:1-0") para no pedirlos dos veces.
-  const footballGoalsCacheRef = useRef<Map<string, MatchGoal[]>>(new Map());
   const [selectedMatch, setSelectedMatch] = useState<Match | null>(null);
   const [selectedTournament, setSelectedTournament] = useState<TournamentItem | null>(null);
 
@@ -481,10 +479,25 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
           existingTeams.length > 0 ? existingTeams : DEFAULT_TEAMS
         );
 
+        // Migración de ajustes de alertas: rellena los eventos nuevos (p. ej.
+        // rojas y goles anulados) sin pisar lo que el usuario ya tenía elegido.
+        const storedNotifications = storedConfig.notifications;
+        const notifications = storedNotifications
+          ? {
+              ...DEFAULT_NOTIFICATION_SETTINGS,
+              ...storedNotifications,
+              events: {
+                ...DEFAULT_NOTIFICATION_SETTINGS.events,
+                ...storedNotifications.events,
+              },
+            }
+          : DEFAULT_NOTIFICATION_SETTINGS;
+
         const nextConfig: Gtr3ConfigState = {
           ...storedConfig,
           favoriteTournaments: normalizedTournaments,
           favoriteTeams: normalizedTeams,
+          notifications,
         };
 
         setWatchConfig((prev) => ({ ...prev, ...nextConfig }));
@@ -534,49 +547,55 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   }, [watchConfig]);
 
   /**
-   * Goles reales de fútbol: consulta `/v4/matches/{id}` solo cuando el marcador
-   * acaba de cambiar y el partido interesa para alertas. Así el aviso de gol dice
-   * quién marcó y en qué minuto. Se cachea por marcador y se limita por pasada.
+   * Incidencias de fútbol (gol con goleador y minuto, rojas/segundas amarillas
+   * y goles anulados por el VAR) desde FotMob, para los partidos en directo que
+   * interesan para alertas: Football-Data no publica eventos de partido en el
+   * plan gratuito. Se adjuntan a `details` y el motor decide qué avisar.
    */
-  const enrichFootballGoals = useCallback(
+  const enrichFootballEvents = useCallback(
     async (
       data: Match[],
-      token: string,
       resolvePrefs: (m: Match) => { relevant: boolean; prefs: NotificationEventPrefs }
     ) => {
-      const cleanToken = (token || '').trim();
-      if (!cleanToken) return;
-
       const candidates: Match[] = [];
       for (const m of data) {
         if (m.game !== 'FÚTBOL' || m.status !== 'LIVE') continue;
         const prev = matchSnapshotsRef.current.get(m.id);
         if (!prev) continue;
-        const changed = `${prev.scoreA}-${prev.scoreB}` !== `${m.teamA.score}-${m.teamB.score}`;
-        if (!changed) continue;
         const { relevant, prefs } = resolvePrefs(m);
-        if (!relevant || !prefs.goal) continue;
+        if (!relevant) continue;
+        if (!prefs.goal && !prefs.redCard && !prefs.goalCancelled) continue;
         candidates.push(m);
       }
       if (candidates.length === 0) return;
 
-      await Promise.all(
+      // Primero los que acaban de cambiar el marcador; después, por hora de
+      // inicio, para no dejar siempre fuera a los mismos con muchos en directo.
+      candidates.sort((a, b) => {
+        const prevA = matchSnapshotsRef.current.get(a.id);
+        const prevB = matchSnapshotsRef.current.get(b.id);
+        const changedA = prevA && `${prevA.scoreA}-${prevA.scoreB}` !== `${a.teamA.score}-${a.teamB.score}` ? 0 : 1;
+        const changedB = prevB && `${prevB.scoreA}-${prevB.scoreB}` !== `${b.teamA.score}-${b.teamB.score}` ? 0 : 1;
+        if (changedA !== changedB) return changedA - changedB;
+        return new Date(a.startTimeIso).getTime() - new Date(b.startTimeIso).getTime();
+      });
+
+      await Promise.allSettled(
         candidates.slice(0, 6).map(async (m) => {
-          const scoreKey = `${m.id}:${m.teamA.score}-${m.teamB.score}`;
-          let goals = footballGoalsCacheRef.current.get(scoreKey);
-          if (goals === undefined) {
-            const rawId = m.id.replace(/^foot-/, '');
-            const fetched = await ScoreService.fetchFootballMatchGoals(rawId, cleanToken);
-            if (fetched === null) return; // fallo puntual: se reintenta en la siguiente pasada
-            goals = fetched;
-            footballGoalsCacheRef.current.set(scoreKey, goals);
-            if (footballGoalsCacheRef.current.size > 200) {
-              const oldest = footballGoalsCacheRef.current.keys().next().value;
-              if (oldest) footballGoalsCacheRef.current.delete(oldest);
-            }
-          }
-          if (goals && goals.length > 0) {
-            m.details = { ...(m.details || {}), goals };
+          try {
+            const detail = await FootballStatsService.getMatchDetail(m);
+            if (!detail) return;
+            const redCards = detail.bookings.filter((b) => b.card !== 'YELLOW');
+            m.details = {
+              ...(m.details || {}),
+              ...(detail.goals.length > 0 ? { goals: detail.goals } : {}),
+              ...(redCards.length > 0 ? { redCards } : {}),
+              ...(detail.goalCancels && detail.goalCancels.length > 0
+                ? { goalCancels: detail.goalCancels }
+                : {}),
+            };
+          } catch (err) {
+            console.warn('Incidencias de fútbol (FotMob) fallaron:', err);
           }
         })
       );
@@ -658,10 +677,10 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
         cfg.favoriteTournaments
       );
 
-      // Goles reales de fútbol: solo se consultan cuando el marcador cambió y el
-      // partido interesa (así el aviso dice quién marcó y en qué minuto).
+      // Incidencias reales de fútbol (goleador, rojas, goles anulados): se
+      // adjuntan a los partidos en directo relevantes antes de comparar.
       if (!firstRun && settings.enabled) {
-        await enrichFootballGoals(data, cfg.footballToken, resolvePrefs);
+        await enrichFootballEvents(data, resolvePrefs);
       }
 
       if (!firstRun) {
@@ -676,6 +695,8 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
                 goal: false,
                 halfTime: false,
                 fullTime: false,
+                redCard: false,
+                goalCancelled: false,
                 mapEnd: false,
                 seriesEnd: false,
                 reminder: false,
@@ -720,7 +741,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
 
       notifEngineReadyRef.current = true;
     },
-    [showToast, reconcileNativeReminders, enrichFootballGoals]
+    [showToast, reconcileNativeReminders, enrichFootballEvents]
   );
 
   // Fetch matches

@@ -21,6 +21,7 @@
 import { Platform } from 'react-native';
 import {
   FootballBooking,
+  FootballGoalCancel,
   FootballLineupPlayer,
   FootballMatchDetail,
   FootballSubstitution,
@@ -329,6 +330,7 @@ export function mapFotmobDetail(data: any, reversed: boolean): FootballMatchDeta
   const goals: MatchGoal[] = [];
   const bookings: FootballBooking[] = [];
   const substitutions: FootballSubstitution[] = [];
+  const goalCancels: FootballGoalCancel[] = [];
   let halfTimeA: number | null = null;
   let halfTimeB: number | null = null;
 
@@ -378,6 +380,21 @@ export function mapFotmobDetail(data: any, reversed: boolean): FootballMatchDeta
         playerOut,
         team: sideFor(Boolean(e.isHome)),
       });
+    } else if (e.type === 'VAR') {
+      // Gol anulado por el VAR: clave estable del evento para no repetir el aviso.
+      const decisionKeys: string[] = Array.isArray(e?.VAR?.decision?.key)
+        ? e.VAR.decision.key.map((k: unknown) => String(k))
+        : [];
+      if (decisionKeys.includes('var_goal_cancelled')) {
+        goalCancels.push({
+          minute: e.time,
+          injuryTime:
+            typeof e.overloadTime === 'number' && e.overloadTime > 0 ? e.overloadTime : null,
+          player: e?.player?.name || e.nameStr,
+          team: sideFor(Boolean(e.isHome)),
+          key: `cancel:${e.eventId ?? `${e.time}:${e?.player?.name || ''}`}`,
+        });
+      }
     } else if (e.type === 'Half' && halfTimeA === null) {
       if (typeof e.homeScore === 'number' && typeof e.awayScore === 'number') {
         halfTimeA = reversed ? e.awayScore : e.homeScore;
@@ -435,6 +452,7 @@ export function mapFotmobDetail(data: any, reversed: boolean): FootballMatchDeta
     goals,
     bookings,
     substitutions,
+    goalCancels,
     lineupA: reversed ? awayLineup : homeLineup,
     lineupB: reversed ? homeLineup : awayLineup,
     statsA: mapStats(reversed ? 1 : 0),
