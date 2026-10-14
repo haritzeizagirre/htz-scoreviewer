@@ -27,6 +27,7 @@ import {
   FootballSubstitution,
   FootballTeamLineup,
   FootballTeamStats,
+  FootballUnavailablePlayer,
   Match,
   MatchGoal,
 } from './types';
@@ -285,16 +286,35 @@ function cleanMinuteParts(short: unknown): { minute: number; injuryTime: number 
   return { minute, injuryTime: isNaN(injuryTime) ? null : injuryTime };
 }
 
+/** Motivos de baja de FotMob (`unavailability.type`) al castellano. */
+const UNAVAILABLE_REASON_ES: Record<string, string> = {
+  injury: 'Lesión',
+  suspension: 'Sanción',
+  doubt: 'Duda',
+  illness: 'Enfermedad',
+  international: 'Con su selección',
+};
+
 function mapLineup(team: any): FootballTeamLineup | undefined {
   const mapPlayer = (p: any): FootballLineupPlayer | null => {
     if (!p || typeof p.name !== 'string' || !p.name.trim()) return null;
     const num = parseInt(String(p.shirtNumber ?? ''), 10);
     const position = POSITION_BY_USUAL[Number(p.usualPlayingPositionId)];
+    const rating = typeof p?.performance?.rating === 'number' ? p.performance.rating : null;
+    // FotMob publica el hueco del jugador en el campo (`verticalLayout`): x/y
+    // son ya el CENTRO de la ficha (el portero va en x=0.5) y 0 en el eje Y es
+    // su propia portería; la vista decide la orientación al pintarlo.
+    const vl = p?.verticalLayout;
+    const hasLayout =
+      vl && typeof vl.x === 'number' && typeof vl.y === 'number';
     return {
       id: p.id,
       name: p.name,
       position,
       shirtNumber: isNaN(num) ? null : num,
+      rating,
+      pitchX: hasLayout ? vl.x : undefined,
+      pitchY: hasLayout ? vl.y : undefined,
     };
   };
 
@@ -307,8 +327,20 @@ function mapLineup(team: any): FootballTeamLineup | undefined {
   const formation = typeof team?.formation === 'string' && team.formation ? team.formation : undefined;
   const coach = typeof team?.coach?.name === 'string' ? team.coach.name : undefined;
 
-  if (starters.length === 0 && bench.length === 0 && !formation && !coach) return undefined;
-  return { formation, coach, starters, bench };
+  const unavailable: FootballUnavailablePlayer[] = (
+    Array.isArray(team?.unavailable) ? team.unavailable : []
+  )
+    .map((u: any): FootballUnavailablePlayer | null => {
+      if (!u || typeof u.name !== 'string' || !u.name.trim()) return null;
+      const type = String(u?.unavailability?.type || '').toLowerCase();
+      return { name: u.name, reason: UNAVAILABLE_REASON_ES[type] };
+    })
+    .filter((u: FootballUnavailablePlayer | null): u is FootballUnavailablePlayer => u !== null);
+
+  if (starters.length === 0 && bench.length === 0 && !formation && !coach && unavailable.length === 0) {
+    return undefined;
+  }
+  return { formation, coach, starters, bench, unavailable };
 }
 
 /** Mapea el JSON de `/api/data/matchDetails` al modelo interno. */

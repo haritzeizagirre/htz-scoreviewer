@@ -224,6 +224,19 @@ export interface FootballLineupPlayer {
   name: string;
   position?: string;
   shirtNumber?: number | null;
+  /** Valoración del jugador (0-10) si la fuente ya la publica. */
+  rating?: number | null;
+  /** Centro del jugador en el campo vertical (0 = banda izquierda, 1 = derecha). */
+  pitchX?: number;
+  /** Centro del jugador en el campo vertical (0 = su portería, 1 = portería rival). */
+  pitchY?: number;
+}
+
+/** Baja de un equipo (lesión, sanción...) para la pestaña de alineaciones. */
+export interface FootballUnavailablePlayer {
+  name: string;
+  /** Motivo en castellano ("Lesión", "Sanción"...), si se conoce. */
+  reason?: string;
 }
 
 /** Alineación, banquillo, entrenador y dibujo de un equipo (Football-Data). */
@@ -232,6 +245,8 @@ export interface FootballTeamLineup {
   coach?: string;
   starters: FootballLineupPlayer[];
   bench: FootballLineupPlayer[];
+  /** Bajas publicadas por la fuente (lesión, sanción...). */
+  unavailable?: FootballUnavailablePlayer[];
 }
 
 /** Comparativa de estadísticas de equipo del partido (Football-Data). */

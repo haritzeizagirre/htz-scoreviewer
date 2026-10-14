@@ -24,6 +24,8 @@ import {
   ArrowLeft,
   BarChart3,
   Info,
+  Activity,
+  Users,
 } from 'lucide-react-native';
 import { Match, SportCategory } from '../services/types';
 import { formatMatchSchedule } from '../services/dateUtils';
@@ -32,7 +34,12 @@ import { getDefaultStreams } from '../services/scoreService';
 import { VlrScoreboardView } from './VlrScoreboardView';
 import { R6ScoreboardView } from './R6ScoreboardView';
 import { LolPicksBansView } from './LolPicksBansView';
-import { FootballStatsView } from './FootballStatsView';
+import {
+  FootballSummaryView,
+  FootballLineupsView,
+  FootballStatsCompareView,
+  useFootballMatchDetail,
+} from './football';
 import { MatchPreviewSection } from './MatchPreviewSection';
 import { MarqueeText } from './MarqueeText';
 import {
@@ -58,16 +65,17 @@ interface MatchDetailModalProps {
 }
 
 /**
- * Juegos con pestaña de estadísticas dedicada (gol.gg / VLR / R6 / Football-Data).
- * El fútbol también la tiene: minuto, cronología completa (goles, tarjetas y
- * cambios), estadísticas de equipo y alineaciones.
+ * Juegos con pestaña de estadísticas dedicada (gol.gg / VLR / R6).
+ * El fútbol no la usa: tiene sus propias páginas (Resumen, Alineaciones,
+ * Jugadores y Estadísticas) alimentadas por `useFootballMatchDetail`.
  */
 function gameHasStats(game?: SportCategory): boolean {
-  return game === 'LOL' || game === 'R6' || game === 'VALORANT' || game === 'FÚTBOL';
+  return game === 'LOL' || game === 'R6' || game === 'VALORANT';
 }
 
-/** Pestaña que se muestra al abrir un partido: Stats si existe, si no el calendario/eventos. */
+/** Pestaña que se muestra al abrir un partido: la de por defecto de cada juego. */
 function defaultTabForGame(game?: SportCategory): string {
+  if (game === 'FÚTBOL') return 'resumen';
   return gameHasStats(game) ? 'stats' : 'mapas';
 }
 
@@ -80,7 +88,7 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
   onSelectTournament,
 }) => {
   // Pestaña activa: al cambiar de partido se reinicia a la de por defecto
-  // (Stats si el juego tiene estadísticas, si no el calendario/mapas) sin
+  // (Resumen en fútbol, Stats si el juego tiene estadísticas, si no mapas) sin
   // depender de un efecto. El modal no se desmonta entre partidos, así que la
   // pestaña elegida se guarda junto al id del partido al que pertenece.
   const [tabState, setTabState] = useState<{ matchId?: string; tab: string }>({
@@ -92,50 +100,65 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
   // El modal es full-screen y queda fuera del SafeAreaView, así que respetamos
   // el notch/barra de estado manualmente para que el header no se solape.
   const insets = useSafeAreaInsets();
+  // Detalle de fútbol compartido por sus páginas (una sola consulta al abrir el
+  // partido). En otros juegos el hook no consulta nada.
+  const footballDetail = useFootballMatchDetail(match, footballToken);
 
   if (!match) return null;
 
   const schedule = formatMatchSchedule(match.startTimeIso, match.status, match.timeInfo);
 
-  const tabs: TabItem[] = [
-    ...(gameHasStats(match.game)
+  const iconColor = (tab: string) =>
+    activeTab === tab ? htzTokens.colors.onPrimary : htzTokens.colors.outline;
+
+  // El fútbol separa su información en páginas: Resumen (minuto y cronología),
+  // Alineaciones (campo), Jugadores (valoraciones) y Estadísticas.
+  const tabs: TabItem[] =
+    match.game === 'FÚTBOL'
       ? [
           {
+            id: 'resumen',
+            label: 'Resumen',
+            icon: <Activity size={13} color={iconColor('resumen')} />,
+          },
+          {
+            id: 'alineaciones',
+            label: 'Alineaciones',
+            icon: <Users size={13} color={iconColor('alineaciones')} />,
+          },
+          {
             id: 'stats',
-            label: 'Stats',
-            icon: (
-              <BarChart3
-                size={13}
-                color={
-                  activeTab === 'stats'
-                    ? htzTokens.colors.onPrimary
-                    : htzTokens.colors.outline
-                }
-              />
-            ),
+            label: 'Estadísticas',
+            icon: <BarChart3 size={13} color={iconColor('stats')} />,
+          },
+          {
+            id: 'info',
+            label: 'Info',
+            icon: <Info size={13} color={iconColor('info')} />,
           },
         ]
-      : []),
-    ...(gameHasStats(match.game)
-      ? []
       : [
+          ...(gameHasStats(match.game)
+            ? [
+                {
+                  id: 'stats',
+                  label: 'Stats',
+                  icon: <BarChart3 size={13} color={iconColor('stats')} />,
+                },
+              ]
+            : [
+                {
+                  id: 'mapas',
+                  label: 'Mapas',
+                  icon: <Layers size={13} color={iconColor('mapas')} />,
+                },
+              ]),
           {
-            id: 'mapas',
-            label: match.game === 'FÚTBOL' ? 'Eventos' : 'Mapas',
-            icon: (
-              <Layers
-                size={13}
-                color={activeTab === 'mapas' ? htzTokens.colors.onPrimary : htzTokens.colors.outline}
-              />
-            ),
+            id: 'info',
+            label: 'Info',
+            icon: <Info size={13} color={iconColor('info')} />,
           },
-        ]),
-    {
-      id: 'info',
-      label: 'Info',
-      icon: <Info size={13} color={activeTab === 'info' ? htzTokens.colors.onPrimary : htzTokens.colors.outline} />,
-    },
-  ];
+        ];
 
   // Canales del partido. Si la fuente no trae retransmisiones (p. ej. fútbol de
   // Football-Data), se usan los canales oficiales por defecto del juego/liga solo
@@ -160,9 +183,6 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
 
   // Puntos BO (Best Of) para mostrar mapa a mapa el progreso
   const bestOf = match.details?.bestOf || (match.game === 'FÚTBOL' ? undefined : 3);
-  const mapsNeededToWin = bestOf ? Math.ceil(bestOf / 2) : 0;
-  const scoreNumA = typeof match.teamA.score === 'number' ? match.teamA.score : 0;
-  const scoreNumB = typeof match.teamB.score === 'number' ? match.teamB.score : 0;
 
   return (
     <Modal
@@ -562,8 +582,21 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
               </View>
             )}
 
-            {/* 2. STATS (BOXSCORE / PICKS SEGÚN EL JUEGO) */}
-            {activeTab === 'stats' && (
+            {/* 2. PÁGINAS DE FÚTBOL: Resumen, Alineaciones y Estadísticas */}
+            {match.game === 'FÚTBOL' && activeTab === 'resumen' && (
+              <FootballSummaryView match={match} state={footballDetail} />
+            )}
+
+            {match.game === 'FÚTBOL' && activeTab === 'alineaciones' && (
+              <FootballLineupsView match={match} state={footballDetail} />
+            )}
+
+            {match.game === 'FÚTBOL' && activeTab === 'stats' && (
+              <FootballStatsCompareView match={match} state={footballDetail} />
+            )}
+
+            {/* 3. STATS PARA EL RESTO DE JUEGOS (BOXSCORE / PICKS SEGÚN EL JUEGO) */}
+            {match.game !== 'FÚTBOL' && activeTab === 'stats' && (
               <View style={styles.tabContent}>
                 {match.game === 'VALORANT' && (
                   <VlrScoreboardView
@@ -589,9 +622,6 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
                     startTimeIso={match.startTimeIso}
                     leagueName={`${match.league} ${match.details?.tournamentStage || ''}`.trim()}
                   />
-                )}
-                {match.game === 'FÚTBOL' && (
-                  <FootballStatsView match={match} footballToken={footballToken} />
                 )}
               </View>
             )}
