@@ -29,7 +29,7 @@ import {
   MatchRegion,
   Match,
 } from '../services/types';
-import { ScoreService, isGameCategoryEnabled } from '../services/scoreService';
+import { ScoreService, isGameCategoryEnabled, MASTER_TEAMS } from '../services/scoreService';
 import { TournamentDetailModal } from './TournamentDetailModal';
 import { TournamentLogo } from './TournamentLogo';
 import { MarqueeText } from './MarqueeText';
@@ -254,6 +254,22 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
     }
     return enriched;
   }, [localTeams, onlineTeams, favoriteTeams, onlyFavorites, enabledGames]);
+
+  // Favoritos "fantasma": equipos guardados que no existen en el catálogo (p. ej.
+  // datos heredados del Hub). Sin esta sección no había forma de quitarlos.
+  const ghostTeamFavorites = useMemo(() => {
+    if (activeCatalogTab !== 'teams') return [] as string[];
+    if (sportFilter !== 'TODOS') return [] as string[];
+    const q = searchQuery.toLowerCase().trim();
+    return (favoriteTeams || []).filter((fav) => {
+      const name = (fav || '').trim();
+      if (!name) return false;
+      if (q && !name.toLowerCase().includes(q)) return false;
+      return !MASTER_TEAMS.some((t) =>
+        ScoreService.isTeamFavorite(t.name, t.shortName, [name], t.id)
+      );
+    });
+  }, [activeCatalogTab, favoriteTeams, searchQuery, sportFilter]);
 
   // Búsqueda en APIs remotas bajo demanda
   const handleSearchOnline = async () => {
@@ -620,6 +636,42 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
                 </Text>
               </HtzCard>
             )}
+
+            {ghostTeamFavorites.length > 0 && (
+              <View style={styles.ghostSection}>
+                <Text style={styles.ghostTitle}>
+                  Favoritos sin ficha ({ghostTeamFavorites.length})
+                </Text>
+                <Text style={styles.ghostSubtitle}>
+                  Están en tus favoritos pero ya no existen en el catálogo. Pulsa la
+                  estrella para quitarlos.
+                </Text>
+                {ghostTeamFavorites.map((name) => (
+                  <HtzCard key={`ghost-${name.toLowerCase()}`} style={styles.itemCard}>
+                    <View style={styles.cardMainClickable}>
+                      <View style={styles.itemLogoBox}>
+                        <Shield size={24} color={htzTokens.colors.outline} />
+                      </View>
+                      <View style={styles.itemInfo}>
+                        <MarqueeText text={name} textStyle={styles.itemTitle} />
+                        <Text style={styles.itemSubtitle}>
+                          Favorito guardado (equipo no encontrado)
+                        </Text>
+                      </View>
+                    </View>
+                    <TouchableOpacity
+                      style={styles.starBtn}
+                      onPress={() => onToggleTeam(name)}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Quitar ${name} de favoritos`}
+                    >
+                      <Star size={22} color="#FBBF24" fill="#FBBF24" />
+                    </TouchableOpacity>
+                  </HtzCard>
+                ))}
+              </View>
+            )}
           </View>
         )}
 
@@ -863,5 +915,20 @@ const styles = StyleSheet.create({
     fontSize: 12,
     textAlign: 'center',
     lineHeight: 16,
+  },
+  ghostSection: {
+    marginTop: 18,
+    gap: 8,
+  },
+  ghostTitle: {
+    color: htzTokens.colors.onSurface,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  ghostSubtitle: {
+    color: htzTokens.colors.outline,
+    fontSize: 11,
+    lineHeight: 15,
+    marginBottom: 4,
   },
 });

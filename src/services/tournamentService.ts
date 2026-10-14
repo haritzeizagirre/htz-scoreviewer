@@ -23,7 +23,7 @@ import { ScoreService, areTeamsMatching } from './scoreService';
 // ==========================================
 const MEMORY_CACHE = new Map<string, { data: TournamentFullDetail; timestamp: number }>();
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutos para datos en directo
-const STORAGE_PREFIX = 'sv_tourn_detail_real_v14_';
+const STORAGE_PREFIX = 'sv_tourn_detail_real_v15_';
 // Caducidad de la caché persistida del detalle de torneo (12 h): evita mostrar
 // clasificaciones o partidos viejos indefinidamente entre versiones de la clave.
 const STORAGE_DETAIL_TTL_MS = 12 * 60 * 60 * 1000;
@@ -1052,6 +1052,43 @@ export function extractParticipantsFromMatches(matches: Match[]): TournamentPart
   return Array.from(teamMap.values());
 }
 
+/**
+ * Construye la lista de participantes a partir de las clasificaciones reales.
+ * En fútbol la tabla oficial es la fuente completa de clubes (la plantilla de
+ * la semilla puede ser parcial, p. ej. LaLiga con 8 de 20 equipos).
+ */
+export function participantsFromStandings(groups?: StandingGroup[]): TournamentParticipant[] {
+  const map = new Map<string, TournamentParticipant>();
+  for (const group of groups || []) {
+    for (const row of group.table || []) {
+      if (!row.teamName || map.has(row.teamName)) continue;
+      map.set(row.teamName, {
+        id:
+          row.teamId !== undefined && row.teamId !== null
+            ? String(row.teamId)
+            : row.teamName,
+        name: row.teamName,
+        shortName: row.shortName,
+        logo: row.teamLogo,
+      });
+    }
+  }
+  return Array.from(map.values());
+}
+
+/**
+ * Devuelve los participantes definitivos de un detalle: los que ya tiene si son
+ * más completos que los derivados de la clasificación, o estos últimos si la
+ * tabla oficial cubre más equipos (caso habitual en ligas de fútbol).
+ */
+function completeParticipantsWithStandings(
+  detail: TournamentFullDetail
+): TournamentParticipant[] {
+  const current = detail.participants || [];
+  const fromStandings = participantsFromStandings(detail.standings);
+  return fromStandings.length > current.length ? fromStandings : current;
+}
+
 // ==========================================
 // FASES DEL TORNEO (PLAY-IN, SUIZA, GRUPOS, PLAYOFFS...)
 // ==========================================
@@ -2076,9 +2113,12 @@ export const TournamentService = {
    */
   getMasterSeed(tournament: TournamentItem): TournamentFullDetail {
     if (MASTER_SEEDS[tournament.id]) {
-      const seed = JSON.parse(JSON.stringify(MASTER_SEEDS[tournament.id]));
+      const seed = JSON.parse(JSON.stringify(MASTER_SEEDS[tournament.id])) as TournamentFullDetail;
       if (tournament.season) seed.season = tournament.season;
       seed.dataSource = 'seed';
+      // La semilla puede traer una plantilla parcial (LaLiga: 8 clubes frente a
+      // 20 en la clasificación). Se completa desde la propia tabla oficial.
+      seed.participants = completeParticipantsWithStandings(seed);
       return seed;
     }
 
@@ -2125,7 +2165,11 @@ export const TournamentService = {
       tournament.pinnedSeriesId !== undefined && tournament.pinnedSeriesId !== null
         ? `_p${tournament.pinnedSeriesId}`
         : '';
-    const key = `${tournament.id}${seasonKey}${pinKey}`;
+    const leagueKey =
+      tournament.leagueId !== undefined && tournament.leagueId !== null
+        ? `_l${tournament.leagueId}`
+        : '';
+    const key = `${tournament.id}${seasonKey}${pinKey}${leagueKey}`;
     const now = Date.now();
 
     // 1. Comprobar caché L1 (RAM)
@@ -2242,6 +2286,13 @@ export const TournamentService = {
           }
           if (!baseDetail.participants || baseDetail.participants.length === 0) {
             baseDetail.participants = extractParticipantsFromMatches(matches);
+          } else if (tournament.game === 'FÚTBOL') {
+            // La plantilla de la semilla puede ser parcial: si los partidos
+            // reales cubren más clubes, se usan como fuente de participantes.
+            const derived = extractParticipantsFromMatches(matches);
+            if (derived.length > baseDetail.participants.length) {
+              baseDetail.participants = derived;
+            }
           }
         }
       } catch (err) {
@@ -2272,6 +2323,8 @@ export const TournamentService = {
     // juegan en liga, suizo o liguillas de clasificación.
     // Los torneos con semilla maestra propia conservan el formato declarado en
     // el catálogo (Champions League, ligas...) salvo que haya fases reales.
+    // La clasificación oficial manda sobre la plantilla de participantes.
+    baseDetail.participants = completeParticipantsWithStandings(baseDetail);
     if ((baseDetail.stages?.length || 0) > 0 || !MASTER_SEEDS[tournament.id]) {
       baseDetail.format = inferTournamentFormat(baseDetail);
     }
@@ -2313,7 +2366,9 @@ export const TournamentService = {
       tournament.pinnedSeriesId !== undefined && tournament.pinnedSeriesId !== null
         ? `p${tournament.pinnedSeriesId}`
         : 'nopin'
-    }_${tournament.season || 'default'}`;
+    }_${tournament.season || 'default'}_${
+      tournament.leagueId !== undefined && tournament.leagueId !== null ? `l${tournament.leagueId}` : 'noleague'
+    }`;
     const now = Date.now();
     const cached = SERIES_RESOLUTION_CACHE.get(cacheKey);
     if (cached && now - cached.timestamp < SERIES_TTL_MS) {
@@ -2377,14 +2432,15 @@ export const TournamentService = {
         tournament.game === 'R6' ? 'r6siege' : null;
 
       // Edición fijada: la del partido clicado o, si no, la última aprendida para
-      // este torneo (solo si encaja con el año objetivo).
+      // este torneo. La recordada solo se usa si su año coincide con el año
+      // objetivo: una edición recordada sin año o de otro año no debe pisar la
+      // edición solicitada (p. ej. abrir "Demacia Cup 2026" y cargar la de 2025).
       const rememberedSeries = LAST_KNOWN_SERIES.get(tournament.id);
       const effectivePinId =
         tournament.pinnedSeriesId ??
         (rememberedSeries &&
-        (targetYear === undefined ||
-          rememberedSeries.year === undefined ||
-          rememberedSeries.year === targetYear)
+        rememberedSeries.year !== undefined &&
+        (targetYear === undefined || rememberedSeries.year === targetYear)
           ? rememberedSeries.seriesId
           : undefined);
 
@@ -2392,9 +2448,15 @@ export const TournamentService = {
       //    (caso de los torneos dinámicos abiertos desde la lista de partidos).
       let effectiveLeagueId: number | string | undefined = tournament.leagueId;
       let resolvedLeague: { leagueId: number | string; name?: string; slug?: string; logo?: string } | undefined;
+      // Ligas alternativas plausibles (p. ej. "Demacia Cup" y "Demacia Cup
+      // Global Invitational"): sus series también entran como candidatas para
+      // encontrar la edición del año objetivo aunque la liga principal solo
+      // tenga ediciones antiguas.
+      let extraLeagueIds: (number | string)[] = [];
+      const rawName = (tournament.name || '').replace(/\s*•.*$/, '').trim();
 
       if (!effectiveLeagueId && tournament.game !== 'FÚTBOL') {
-        const leagueCacheKey = `${tournament.game}_${(tournament.name || '').toLowerCase()}`;
+        const leagueCacheKey = `${tournament.game}_${rawName.toLowerCase()}`;
         const cachedLeague = LEAGUE_RESOLUTION_CACHE.get(leagueCacheKey);
         if (cachedLeague && now - cachedLeague.timestamp < LEAGUE_TTL_MS) {
           effectiveLeagueId = cachedLeague.leagueId;
@@ -2415,7 +2477,6 @@ export const TournamentService = {
             };
             return (aliases[vg] || []).includes(s);
           };
-          const rawName = (tournament.name || '').replace(/\s*•.*$/, '').trim();
           const attempts: string[] = [];
           if (rawName) {
             // Primero con el año: cubre ligas que separan ediciones por nombre
@@ -2436,6 +2497,7 @@ export const TournamentService = {
           const norm = (s: string) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
           const target = norm(rawName);
 
+          const plausibleById = new Map<string, any>();
           for (const q of attempts) {
             const list = await safeFetchPanda(`/leagues?search[name]=${encodeURIComponent(q)}&per_page=25`);
             if (!list || list.length === 0) continue;
@@ -2443,25 +2505,45 @@ export const TournamentService = {
               ? list.filter((l: any) => vgMatches(l.videogame?.slug))
               : [];
             const pool = sameGame.length > 0 ? sameGame : list;
-            const best =
-              pool.find((l: any) => norm(l.name) === target) ||
-              pool.find((l: any) => {
-                const n = norm(l.name);
-                return n.length >= 4 && (target.includes(n) || n.includes(target));
-              });
-            if (best && best.id) {
-              effectiveLeagueId = best.id;
-              resolvedLeague = { leagueId: best.id, name: best.name, slug: best.slug, logo: best.image_url };
-              LEAGUE_RESOLUTION_CACHE.set(leagueCacheKey, { ...resolvedLeague, timestamp: now });
-              break;
+            for (const l of pool) {
+              if (!l || !l.id) continue;
+              const n = norm(l.name);
+              const plausible =
+                n === target ||
+                (n.length >= 4 && target.length >= 4 && (target.includes(n) || n.includes(target)));
+              if (plausible) plausibleById.set(String(l.id), l);
             }
+            // Coincidencia exacta: no hace falta seguir probando variantes.
+            if (pool.some((l: any) => norm(l.name) === target)) break;
+          }
+
+          const plausible = [...plausibleById.values()];
+          const primary =
+            plausible.find((l: any) => norm(l.name) === target) ||
+            plausible.sort((a: any, b: any) => norm(b.name).length - norm(a.name).length)[0];
+          if (primary && primary.id) {
+            effectiveLeagueId = primary.id;
+            resolvedLeague = { leagueId: primary.id, name: primary.name, slug: primary.slug, logo: primary.image_url };
+            LEAGUE_RESOLUTION_CACHE.set(leagueCacheKey, { ...resolvedLeague, timestamp: now });
+            extraLeagueIds = plausible
+              .filter((l: any) => String(l.id) !== String(primary.id))
+              .slice(0, 2)
+              .map((l: any) => l.id);
           }
         }
       }
 
-      // 0b. Serie configurada explícitamente en el catálogo (externalId) o fijada
-      //     por el partido desde el que se abrió el torneo (effectivePinId)
-      const explicitSeriesId = effectivePinId ?? tournament.externalId;
+      // 0b. Serie configurada explícitamente en el catálogo o fijada por el
+      //     partido desde el que se abrió el torneo (effectivePinId). En los
+      //     ítems de la búsqueda online, `externalId` guarda el id de la LIGA
+      //     (no de una serie): usarlo como serie cargaba datos de otra
+      //     competición o de la edición del año anterior.
+      const externalIdIsLeague =
+        tournament.leagueId !== undefined &&
+        tournament.externalId !== undefined &&
+        String(tournament.externalId) === String(tournament.leagueId);
+      const catalogueSeriesId = externalIdIsLeague ? undefined : tournament.externalId;
+      const explicitSeriesId = effectivePinId ?? catalogueSeriesId;
       if (explicitSeriesId !== undefined && explicitSeriesId !== null) {
         const directSeries = await safeFetchPandaOne(`/series/${explicitSeriesId}`);
         if (directSeries && directSeries.id) {
@@ -2483,6 +2565,14 @@ export const TournamentService = {
         }
       }
 
+      // 1a. Ligas alternativas plausibles: sus series también son candidatas.
+      for (const leagueId of extraLeagueIds) {
+        const list = await safeFetchPanda(`/leagues/${leagueId}/series?per_page=100`);
+        if (list && list.length > 0) {
+          seriesCandidates.push(...list);
+        }
+      }
+
       // 1b. Refuerzo: búsqueda directa de la edición del año objetivo por slug.
       //     Cubre ligas cuyos listados no incluyen la edición en curso.
       if (targetYear && tournament.slug && vgSlug) {
@@ -2492,6 +2582,22 @@ export const TournamentService = {
         );
         if (yearList && yearList.length > 0) {
           seriesCandidates.push(...yearList);
+        }
+      }
+
+      // 1c. Búsqueda transversal por nombre de serie: hay ediciones que en
+      //     PandaScore viven en una liga con nombre distinto al del catálogo
+      //     (p. ej. "Demacia Cup Global Invitational 2026"), así que además de
+      //     la liga se busca la serie por su nombre y se filtra por año abajo.
+      if (vgSlug && rawName) {
+        const nameKeyword = rawName.replace(/\b20\d{2}\b/g, '').trim();
+        if (nameKeyword.length >= 4) {
+          const nameList = await safeFetchPanda(
+            `/${vgSlug}/series?search[name]=${encodeURIComponent(nameKeyword)}&per_page=50&sort=-begin_at`
+          );
+          if (nameList && nameList.length > 0) {
+            seriesCandidates.push(...nameList);
+          }
         }
       }
 
@@ -2591,8 +2697,8 @@ export const TournamentService = {
       }
 
       if (filtered.length === 0) {
-        if (tournament.externalId) {
-          return { seriesId: tournament.externalId };
+        if (catalogueSeriesId) {
+          return { seriesId: catalogueSeriesId };
         }
         return null;
       }
@@ -2643,8 +2749,8 @@ export const TournamentService = {
       }
 
       // Serie configurada explícitamente en el catálogo (si sigue siendo válida)
-      const pinnedSeries = tournament.externalId
-        ? filtered.find((s: any) => String(s.id) === String(tournament.externalId))
+      const pinnedSeries = catalogueSeriesId
+        ? filtered.find((s: any) => String(s.id) === String(catalogueSeriesId))
         : undefined;
 
       // Prioridad 0: edición del año objetivo (ej. "Summer 2026", "2026",
@@ -2730,7 +2836,11 @@ export const TournamentService = {
       return res;
     } catch (e) {
       console.warn('Error resolviendo serie activa de PandaScore:', e);
-      if (tournament.externalId) {
+      const externalIdIsLeague =
+        tournament.leagueId !== undefined &&
+        tournament.externalId !== undefined &&
+        String(tournament.externalId) === String(tournament.leagueId);
+      if (tournament.externalId && !externalIdIsLeague) {
         return { seriesId: tournament.externalId };
       }
       return null;
@@ -2777,7 +2887,13 @@ export const TournamentService = {
     try {
       // 1. Resolver dinámicamente la edición activa
       const resolved = await this.resolveActiveEsportsSeries(tournament, cleanToken);
-      const seriesId = resolved?.seriesId || tournament.externalId;
+      // En ítems de búsqueda online `externalId` es el id de la LIGA, no de una
+      // serie: no debe usarse como id de serie (cargaría otra competición).
+      const externalIdIsLeague =
+        tournament.leagueId !== undefined &&
+        tournament.externalId !== undefined &&
+        String(tournament.externalId) === String(tournament.leagueId);
+      const seriesId = resolved?.seriesId || (externalIdIsLeague ? undefined : tournament.externalId);
       if (!seriesId) return null;
 
       // Recordar la edición abierta desde un partido para futuras aperturas

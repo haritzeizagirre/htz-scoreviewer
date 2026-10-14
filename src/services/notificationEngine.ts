@@ -10,7 +10,7 @@ import {
   NotificationSettings,
   SportCategory,
 } from './types';
-import { MASTER_TOURNAMENTS, ScoreService, isTeamFavorite, isTournamentFavorite } from './scoreService';
+import { ScoreService, findMasterTournamentForFavorite, isTeamFavorite, isTournamentFavorite } from './scoreService';
 
 export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   enabled: false,
@@ -155,12 +155,7 @@ export function groupFavoriteTournaments(favorites: string[]): FavoriteGroup[] {
     const f = (fav || '').trim();
     if (!f) continue;
     const lower = f.toLowerCase();
-    const master = MASTER_TOURNAMENTS.find(
-      (mt) =>
-        mt.id.toLowerCase() === lower ||
-        mt.name.toLowerCase() === lower ||
-        (mt.slug && mt.slug.toLowerCase() === lower)
-    );
+    const master = findMasterTournamentForFavorite(f);
     const key = master ? master.id.toLowerCase() : `dyn:${lower}`;
     const existing = groups.get(key);
     if (existing) {

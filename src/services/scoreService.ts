@@ -191,6 +191,13 @@ export function isTournamentItemFavorite(
     if (!f) return false;
     if (f === tName || (tSlug && f === tSlug)) return true;
 
+    // El favorito puede llevar la edición en el nombre ("Demacia Cup 2026"):
+    // el torneo maestro no está atado a un año, así que la comparación se hace
+    // sobre el nombre sin años. Esto evita además favoritos "fantasma" que no
+    // casaban con ninguna tarjeta y no se podían quitar desde la estrella.
+    if (favoriteMatchesTournamentName(f, tName)) return true;
+    if (tSlug && favoriteMatchesTournamentName(f, tSlug)) return true;
+
     // Normalización de IDs maestros comunes
     if (tId === 'foot-pd' && (f === 'laliga ea sports' || f === 'laliga' || f === 'primera division')) return true;
     if (tId === 'foot-cl' && (f === 'uefa champions league' || f === 'champions league')) return true;
@@ -227,9 +234,10 @@ export function isTournamentFavorite(
       const candidates = [master.id, master.name, master.shortName, master.slug]
         .filter((v): v is string => Boolean(v))
         .map((v) => v.toLowerCase().trim());
-      return favorites.some((f) => {
-        const fav = f.toLowerCase().trim();
-        return fav.length > 0 && candidates.includes(fav);
+      return favorites.some((fav) => {
+        const f = fav.toLowerCase().trim();
+        if (!f) return false;
+        return candidates.some((c) => favoriteMatchesTournamentName(f, c));
       });
     }
     // ID no reconocido (favorito dinámico de PandaScore / búsqueda online)
@@ -242,6 +250,21 @@ export function isTournamentFavorite(
 
     // Coincidencia exacta directa
     if (f === l || (tid && f === tid)) return true;
+
+    // Edición explícita en el favorito: "Demacia Cup 2026" debe marcar los
+    // partidos de "Demacia Cup Global Invitational 2026" (mismo nombre base y
+    // mismo año) cuando el partido no trae ID maestro.
+    const favKey = tournamentFavoriteKey(f);
+    const leagueKey = tournamentFavoriteKey(l);
+    if (favKey && leagueKey) {
+      if (favKey === leagueKey) return true;
+      if (favKey.length >= 6 && leagueKey.startsWith(favKey)) {
+        const remainder = leagueKey.slice(favKey.length);
+        if (/^(?:global)?invitational|^international|^world|^finals?|^masters?|^championship|^cup|^copa|^series|^split/.test(remainder)) {
+          return true;
+        }
+      }
+    }
 
     // Palabras genéricas que NO deben activar coincidencia difusa por subcadena
     const GENERIC_WORDS = new Set([
@@ -375,6 +398,9 @@ export function toggleTournamentFavorite(
         }
         // Si es local maestro, eliminar su ID y sus nombres/alias exactos
         if (f === tId || f === tName || (tSlug && f === tSlug)) return false;
+        // También las variantes con edición ("Demacia Cup 2026") del mismo torneo.
+        if (favoriteMatchesTournamentName(f, tName)) return false;
+        if (tSlug && favoriteMatchesTournamentName(f, tSlug)) return false;
         if (tId === 'foot-pd' && (f === 'laliga ea sports' || f === 'laliga')) return false;
         if (tId === 'foot-cl' && (f === 'uefa champions league' || f === 'champions league')) return false;
         if (tId === 'vlr-champions' && (f === 'valorant champions' || f === 'vlr-champions')) return false;
@@ -1154,6 +1180,58 @@ function normalizeTournamentKey(value?: string): string {
   return (value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+/** Quita años ("2026", "2025/2026") y etiquetas de temporada de un nombre. */
+function stripTournamentYears(value: string): string {
+  return (value || '')
+    .replace(/\b20\d{2}(?:\s*\/\s*\d{2,4})?\b/g, ' ')
+    .replace(/\b(?:spring|summer|winter|autumn|fall|split|season|temporada|regular)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Clave canónica sin edición de un nombre de torneo/favorito: permite que un
+ * favorito guardado como "Demacia Cup 2026" case con el torneo maestro "Demacia
+ * Cup" (los torneos del catálogo no están atados a una edición concreta).
+ */
+export function tournamentFavoriteKey(value?: string): string {
+  return normalizeTournamentKey(stripTournamentYears(value || ''));
+}
+
+/** ¿El favorito (posiblemente con año/split) corresponde al nombre candidato? */
+function favoriteMatchesTournamentName(favorite: string, candidate: string): boolean {
+  const f = (favorite || '').toLowerCase().trim();
+  const c = (candidate || '').toLowerCase().trim();
+  if (!f || !c) return false;
+  if (f === c) return true;
+  const fk = tournamentFavoriteKey(f);
+  const ck = tournamentFavoriteKey(c);
+  return Boolean(fk && ck && fk === ck);
+}
+
+/**
+ * Torneo maestro al que pertenece un favorito guardado como texto libre.
+ * Cubre tanto coincidencia exacta (id/nombre/slug) como variantes con edición
+ * ("Demacia Cup 2026" -> "Demacia Cup").
+ */
+export function findMasterTournamentForFavorite(favorite: string): TournamentItem | null {
+  const f = (favorite || '').trim().toLowerCase();
+  if (!f) return null;
+  const exact = MASTER_TOURNAMENTS.find(
+    (mt) =>
+      mt.id.toLowerCase() === f ||
+      (mt.slug && mt.slug.toLowerCase() === f) ||
+      mt.name.toLowerCase() === f
+  );
+  if (exact) return exact;
+  return (
+    MASTER_TOURNAMENTS.find((mt) => {
+      const values = [mt.name, mt.shortName].filter((v): v is string => Boolean(v));
+      return values.some((v) => favoriteMatchesTournamentName(favorite, v));
+    }) || null
+  );
+}
+
 /**
  * Busca el torneo maestro del catálogo al que corresponde una liga online de
  * PandaScore (por leagueId, nombre o slug). Se usa para que favoritar una liga
@@ -1175,7 +1253,9 @@ export function findMasterTournamentForLeague(
 
   const n = normalizeTournamentKey(name);
   const s = normalizeTournamentKey(slug);
-  if (!n && !s) return null;
+  const nBase = normalizeTournamentKey(stripTournamentYears(name || ''));
+  const sBase = normalizeTournamentKey(stripTournamentYears(slug || ''));
+  if (!n && !s && !nBase && !sBase) return null;
 
   let best: { mt: TournamentItem; len: number } | null = null;
   for (const mt of MASTER_TOURNAMENTS) {
@@ -1184,13 +1264,27 @@ export function findMasterTournamentForLeague(
       normalizeTournamentKey(mt.name),
       normalizeTournamentKey(mt.shortName),
       normalizeTournamentKey(mt.slug),
-    ].filter((v) => v.length >= 4);
+    ].filter((v) => v.length >= 3);
     for (const c of candidates) {
-      const equal = n === c || s === c;
+      const equal = n === c || s === c || nBase === c || sBase === c;
       // Nombre de liga con sufijo de edición/año: "Demacia Cup 2026" -> "Demacia Cup".
       const yearSuffixed =
-        n.length > c.length && n.startsWith(c) && /^(20\d{2}|\d{2})/.test(n.slice(c.length));
-      if ((equal || yearSuffixed) && (!best || c.length > best.len)) {
+        c.length >= 4 &&
+        n.length > c.length &&
+        n.startsWith(c) &&
+        /^(20\d{2}|\d{2})/.test(n.slice(c.length));
+      // Variante con palabra de edición: la liga real de PandaScore puede
+      // llamarse distinto al maestro ("Demacia Cup Global Invitational 2026").
+      const base = nBase.startsWith(c) ? nBase : sBase.startsWith(c) ? sBase : '';
+      const remainder = base ? base.slice(c.length) : '';
+      const editionVariant =
+        c.length >= 4 &&
+        remainder.length > 0 &&
+        remainder.length <= 24 &&
+        /^(?:global|international|world|major|emea|americas|pacific|china|europe|finals?|championship|invitational|masters?|series|cup|copa|playoffs?|season|split|open)/.test(
+          remainder
+        );
+      if ((equal || yearSuffixed || editionVariant) && (!best || c.length > best.len)) {
         best = { mt, len: c.length };
       }
     }
@@ -2086,6 +2180,20 @@ export const MASTER_TEAMS: TeamCatalogItem[] = [
   { id: 'ath', name: 'Athletic Club', shortName: 'ATH', logo: 'https://crests.football-data.org/77.png', game: 'FÚTBOL', tier: 'S', region: 'ESPAÑA', location: 'Bilbao, España' },
   { id: 'atm', name: 'Atlético de Madrid', shortName: 'ATM', logo: 'https://crests.football-data.org/78.png', game: 'FÚTBOL', tier: 'S', region: 'ESPAÑA', location: 'Madrid, España' },
   { id: 'gir', name: 'Girona FC', shortName: 'GIR', logo: 'https://crests.football-data.org/298.png', game: 'FÚTBOL', tier: 'S', region: 'ESPAÑA', location: 'Girona, España' },
+  { id: 'vil', name: 'Villarreal CF', shortName: 'VIL', logo: 'https://crests.football-data.org/94.png', game: 'FÚTBOL', tier: 'A', region: 'ESPAÑA', location: 'Villarreal, España' },
+  { id: 'bet', name: 'Real Betis', shortName: 'BET', logo: 'https://crests.football-data.org/90.png', game: 'FÚTBOL', tier: 'A', region: 'ESPAÑA', location: 'Sevilla, España' },
+  { id: 'mll', name: 'RCD Mallorca', shortName: 'MLL', logo: 'https://crests.football-data.org/89.png', game: 'FÚTBOL', tier: 'A', region: 'ESPAÑA', location: 'Palma de Mallorca, España' },
+  { id: 'osa', name: 'CA Osasuna', shortName: 'OSA', logo: 'https://crests.football-data.org/79.png', game: 'FÚTBOL', tier: 'A', region: 'ESPAÑA', location: 'Pamplona, España' },
+  { id: 'cel', name: 'RC Celta de Vigo', shortName: 'CEL', logo: 'https://crests.football-data.org/558.png', game: 'FÚTBOL', tier: 'A', region: 'ESPAÑA', location: 'Vigo, España' },
+  { id: 'sev', name: 'Sevilla FC', shortName: 'SEV', logo: 'https://crests.football-data.org/559.png', game: 'FÚTBOL', tier: 'A', region: 'ESPAÑA', location: 'Sevilla, España' },
+  { id: 'ray', name: 'Rayo Vallecano', shortName: 'RAY', logo: 'https://crests.football-data.org/87.png', game: 'FÚTBOL', tier: 'A', region: 'ESPAÑA', location: 'Madrid, España' },
+  { id: 'ala', name: 'Deportivo Alavés', shortName: 'ALA', logo: 'https://crests.football-data.org/263.png', game: 'FÚTBOL', tier: 'A', region: 'ESPAÑA', location: 'Vitoria-Gasteiz, España' },
+  { id: 'get', name: 'Getafe CF', shortName: 'GET', logo: 'https://crests.football-data.org/82.png', game: 'FÚTBOL', tier: 'A', region: 'ESPAÑA', location: 'Getafe, España' },
+  { id: 'lpa', name: 'UD Las Palmas', shortName: 'LPA', logo: 'https://crests.football-data.org/275.png', game: 'FÚTBOL', tier: 'A', region: 'ESPAÑA', location: 'Las Palmas de Gran Canaria, España' },
+  { id: 'esp', name: 'RCD Espanyol', shortName: 'ESP', logo: 'https://crests.football-data.org/80.png', game: 'FÚTBOL', tier: 'A', region: 'ESPAÑA', location: 'Barcelona, España' },
+  { id: 'leg', name: 'CD Leganés', shortName: 'LEG', logo: 'https://crests.football-data.org/745.png', game: 'FÚTBOL', tier: 'A', region: 'ESPAÑA', location: 'Leganés, España' },
+  { id: 'val', name: 'Valencia CF', shortName: 'VAL', logo: 'https://crests.football-data.org/95.png', game: 'FÚTBOL', tier: 'A', region: 'ESPAÑA', location: 'Valencia, España' },
+  { id: 'vld', name: 'Real Valladolid', shortName: 'VLD', logo: 'https://crests.football-data.org/250.png', game: 'FÚTBOL', tier: 'A', region: 'ESPAÑA', location: 'Valladolid, España' },
   { id: 'mci', name: 'Manchester City', shortName: 'MCI', logo: 'https://crests.football-data.org/65.png', game: 'FÚTBOL', tier: 'S', region: 'EMEA', location: 'Mánchester, Inglaterra' },
   { id: 'ars', name: 'Arsenal FC', shortName: 'ARS', logo: 'https://crests.football-data.org/57.png', game: 'FÚTBOL', tier: 'S', region: 'EMEA', location: 'Londres, Inglaterra' },
   { id: 'liv', name: 'Liverpool FC', shortName: 'LIV', logo: 'https://crests.football-data.org/64.png', game: 'FÚTBOL', tier: 'S', region: 'EMEA', location: 'Liverpool, Inglaterra' },
@@ -4711,6 +4819,12 @@ export const ScoreService = {
     const tShort = (tournament.shortName || '').toLowerCase();
     const tSlug = (tournament.slug || '').toLowerCase();
 
+    // Año objetivo del torneo abierto (de su temporada o de su nombre): un partido
+    // que declare otro año (p. ej. "Demacia Cup 2025" al abrir la edición 2026) no
+    // debe colarse en la pestaña de partidos.
+    const targetYearMatch = `${tournament.season || ''} ${tournament.name || ''}`.match(/\b(20\d{2})\b/);
+    const targetYear = targetYearMatch ? parseInt(targetYearMatch[1], 10) : undefined;
+
     // Coincidencia por palabra completa (evita que "VCT" incluya partidos de
     // cualquier evento VCT, como cuando se abría Masters con el texto genérico).
     const containsWord = (haystack: string, needle: string) => {
@@ -4724,6 +4838,10 @@ export const ScoreService = {
 
     return allMatches.filter((m) => {
       if (m.game !== tournament.game) return false;
+      if (targetYear !== undefined) {
+        const years = `${m.league} ${m.details?.tournamentStage || ''}`.match(/\b20\d{2}\b/g);
+        if (years && years.every((y) => parseInt(y, 10) !== targetYear)) return false;
+      }
       // Vía fiable: el partido conoce su torneo maestro
       if (m.masterTournamentId && m.masterTournamentId === tournament.id) return true;
 
@@ -4761,5 +4879,7 @@ export const ScoreService = {
   normalizeFavoriteTeams,
   resolveMasterTournamentId,
   getDefaultFavoriteTournaments,
+  findMasterTournamentForFavorite,
+  tournamentFavoriteKey,
 };
 

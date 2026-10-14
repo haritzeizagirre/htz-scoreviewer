@@ -259,6 +259,9 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   const lastLoadStartRef = useRef(0);
   // Auto-refresco: con directos se refresca más a menudo.
   const hasLiveRef = useRef(false);
+  // Auto-refresco: también se sube el ritmo cerca de la hora de inicio de un
+  // partido (o recién empezado) para que el aviso de kickoff sea puntual.
+  const nearKickoffRef = useRef(false);
   // Motor de alertas: estado anterior de cada partido y eventos ya notificados.
   const matchSnapshotsRef = useRef<Map<string, MatchSnapshot>>(new Map());
   const notifiedEventsRef = useRef<Set<string>>(new Set());
@@ -821,11 +824,21 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
   // Mantiene el flag de "hay directos" para que el auto-refresco elija el ritmo.
   useEffect(() => {
     hasLiveRef.current = matches.some((m) => m.status === 'LIVE');
+    // Cerca de la hora de inicio (5 min antes/después) también se refresca rápido:
+    // es la franja en la que interesa detectar el kickoff con puntualidad.
+    const now = Date.now();
+    nearKickoffRef.current = matches.some((m) => {
+      if (m.status === 'FINISHED') return false;
+      const start = new Date(m.startTimeIso).getTime();
+      if (isNaN(start)) return false;
+      const delta = start - now;
+      return delta <= 5 * 60_000 && delta >= -5 * 60_000;
+    });
   }, [matches]);
 
   // Auto-refresco inteligente: cada 30 s comprueba si toca recargar. Con partidos
-  // en directo refresca ~cada 75 s; sin ellos, cada 3 minutos. Se salta si la app
-  // está en segundo plano o si acaba de lanzarse una carga.
+  // en directo (o cerca de empezar) refresca ~cada 75 s; sin ellos, cada 3 minutos.
+  // Se salta si la app está en segundo plano o si acaba de lanzarse una carga.
   useEffect(() => {
     if (!configReady) return;
     const AUTO_REFRESH_LIVE_MS = 75_000;
@@ -833,7 +846,8 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
     const timer = setInterval(() => {
       if (appStateRef.current !== 'active') return;
       const elapsed = Date.now() - lastLoadStartRef.current;
-      const threshold = hasLiveRef.current ? AUTO_REFRESH_LIVE_MS : AUTO_REFRESH_IDLE_MS;
+      const threshold =
+        hasLiveRef.current || nearKickoffRef.current ? AUTO_REFRESH_LIVE_MS : AUTO_REFRESH_IDLE_MS;
       if (elapsed >= threshold) loadMatches();
     }, 30_000);
     return () => clearInterval(timer);

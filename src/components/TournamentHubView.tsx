@@ -149,8 +149,10 @@ export const TournamentHubView: React.FC<TournamentHubViewProps> = ({
   }, [searchQuery, sportFilter, tierFilter, regionFilter, favoriteTournaments, enabledGames, onlineTournaments]);
 
   const favTournaments = useMemo(() => {
+    // Misma condición que la estrella de las tarjetas: si un torneo aparece en
+    // "Tus Torneos Favoritos", su estrella debe verse encendida (y viceversa).
     return allTournaments.filter((t) =>
-      ScoreService.isTournamentFavorite(t.name, t.shortName, favoriteTournaments, t.id)
+      ScoreService.isTournamentItemFavorite(t, favoriteTournaments)
     );
   }, [allTournaments, favoriteTournaments]);
 

@@ -58,6 +58,15 @@ export const KICKOFF_MAX_AGE_MS = 12 * 60_000;
  * partido ya va 5-0). Se omite.
  */
 export const KICKOFF_MAX_START_AGE_MS = 10 * 60_000;
+/**
+ * Ventana del aviso puntual de inicio: si la hora oficial ya pasó y la fuente
+ * aún no marca el partido en directo, se avisa igualmente dentro de estos
+ * minutos para no depender del retraso de la fuente (p. ej. avisar a las 21:01
+ * de un partido de las 21:00 en vez de a las 21:06). Comparte clave de
+ * deduplicación con el aviso por transición, así que no se duplica cuando la
+ * fuente confirma el LIVE.
+ */
+export const KICKOFF_PUNCTUAL_WINDOW_MS = 3 * 60_000;
 /** La foto anterior más antigua que esto ya no sirve para avisos "en vivo". */
 export const LIVE_EVENT_MAX_AGE_MS = 30 * 60_000;
 
@@ -144,6 +153,28 @@ export function diffMatchEvents(
   const startAgeOk =
     isNaN(startMs) || startMs > nowMs || nowMs - startMs <= KICKOFF_MAX_START_AGE_MS;
   if (prefs.kickoff && kickoffFresh && startAgeOk && prev.status !== 'LIVE' && match.status === 'LIVE') {
+    out.push({
+      dedupeKey: `${match.id}:kickoff`,
+      event: 'kickoff',
+      game: match.game,
+      title: `En directo: ${shortA} vs ${shortB}`,
+      body: league,
+    });
+  }
+
+  // 1b. Inicio puntual por hora oficial: si el partido ya debería haber
+  // empezado y la fuente todavía no lo marca como LIVE (retraso habitual de
+  // PandaScore/Football-Data), se avisa igualmente dentro de una ventana
+  // corta. La clave es la misma que la del aviso por transición.
+  if (
+    prefs.kickoff &&
+    kickoffFresh &&
+    prev.status !== 'LIVE' &&
+    match.status === 'UPCOMING' &&
+    !isNaN(startMs) &&
+    nowMs >= startMs &&
+    nowMs - startMs <= KICKOFF_PUNCTUAL_WINDOW_MS
+  ) {
     out.push({
       dedupeKey: `${match.id}:kickoff`,
       event: 'kickoff',

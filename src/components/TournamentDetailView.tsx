@@ -130,6 +130,16 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
     };
     const belongsToTournament = (m: Match) => {
       if (m.game !== detail.game) return false;
+      // No mezclar ediciones: si el torneo abierto declara un año (p. ej. 2026)
+      // y el partido declara SOLO otro año (2025), no pertenece a esta edición.
+      const seasonText = `${tournament.season || ''} ${detail.season || ''}`;
+      const seasonYears: string[] = seasonText.match(/\b20\d{2}\b/g) || [];
+      if (seasonYears.length > 0) {
+        const matchYears: string[] = `${m.league} ${m.details?.tournamentStage || ''}`.match(/\b20\d{2}\b/g) || [];
+        if (matchYears.length > 0 && !matchYears.some((y) => seasonYears.includes(y))) {
+          return false;
+        }
+      }
       if (m.masterTournamentId) {
         return m.masterTournamentId === tournament.id || m.masterTournamentId === detail.id;
       }
@@ -156,7 +166,7 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
       }
     }
     return result;
-  }, [detail.matches, detail.id, detail.game, tournament.id, tournament.name, tournament.shortName, feedMatches]);
+  }, [detail.matches, detail.id, detail.game, detail.season, tournament.id, tournament.name, tournament.shortName, tournament.season, feedMatches]);
 
   const stages = React.useMemo(() => detail.stages || [], [detail.stages]);
   const hasStages = stages.length > 0;
