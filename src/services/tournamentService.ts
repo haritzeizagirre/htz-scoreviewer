@@ -14,9 +14,16 @@ import {
   BracketMatch,
   TournamentParticipant,
   Match,
+  MatchStatus,
   SportCategory,
 } from './types';
-import { ScoreService, areTeamsMatching } from './scoreService';
+import { ScoreService, areTeamsMatching, getDefaultStreams } from './scoreService';
+import { formatMatchSchedule } from './dateUtils';
+import {
+  FootballStatsService,
+  FotmobLeagueMatch,
+  FotmobLeagueStandingRow,
+} from './footballStatsService';
 
 // ==========================================
 // CACHÉ DE DOBLE NIVEL (L1 MEMORIA + L2 STORAGE)
@@ -2254,6 +2261,77 @@ const MASTER_SEEDS: Record<string, TournamentFullDetail> = {
 };
 
 // ==========================================
+// RESPALDO FOTMOB (competiciones fuera del plan de Football-Data)
+// ==========================================
+
+/** Fila de clasificación de FotMob al modelo interno. */
+function mapFotmobStandingRow(row: FotmobLeagueStandingRow): StandingRow {
+  return {
+    position: row.position,
+    teamId: row.teamId,
+    teamName: row.teamName,
+    shortName: row.shortName,
+    teamLogo: row.teamLogo,
+    playedGames: row.played,
+    won: row.won,
+    draw: row.draw,
+    lost: row.lost,
+    points: row.points,
+    goalsFor: row.goalsFor,
+    goalsAgainst: row.goalsAgainst,
+    goalDifference: row.goalDifference,
+  };
+}
+
+/**
+ * Partido de una competición de FotMob al modelo interno. El id se guarda como
+ * `foot-<id de FotMob>` para que la ficha del partido (minuto, eventos,
+ * alineaciones, valoraciones y stats) lo resuelva con la misma fuente.
+ */
+function mapFotmobLeagueMatch(m: FotmobLeagueMatch, tournament: TournamentItem): Match {
+  const status: MatchStatus = m.finished ? 'FINISHED' : m.started ? 'LIVE' : 'UPCOMING';
+  const schedule = formatMatchSchedule(m.utcTime, status, undefined);
+  const scoreA = typeof m.scoreA === 'number' ? m.scoreA : status === 'UPCOMING' ? '-' : 0;
+  const scoreB = typeof m.scoreB === 'number' ? m.scoreB : status === 'UPCOMING' ? '-' : 0;
+  return {
+    id: `foot-${m.id}`,
+    game: 'FÚTBOL',
+    league: tournament.name,
+    status,
+    timeInfo: status === 'FINISHED' ? `${scoreA} - ${scoreB}` : schedule.badgeText,
+    startTimeIso: m.utcTime || new Date().toISOString(),
+    tier: tournament.tier,
+    region: tournament.region,
+    masterTournamentId: tournament.id,
+    teamA: {
+      id: m.homeId,
+      name: m.homeName,
+      shortName: m.homeShortName || m.homeName.slice(0, 3).toUpperCase(),
+      score: scoreA,
+      logo: m.homeLogo,
+    },
+    teamB: {
+      id: m.awayId,
+      name: m.awayName,
+      shortName: m.awayShortName || m.awayName.slice(0, 3).toUpperCase(),
+      score: scoreB,
+      logo: m.awayLogo,
+    },
+    liveRoundScore:
+      status === 'LIVE'
+        ? {
+            scoreA: typeof m.scoreA === 'number' ? m.scoreA : 0,
+            scoreB: typeof m.scoreB === 'number' ? m.scoreB : 0,
+            roundOrTime: 'En Juego',
+          }
+        : undefined,
+    details: {
+      streams: getDefaultStreams('FÚTBOL', tournament.name),
+    },
+  };
+}
+
+// ==========================================
 // TOURNAMENT SERVICE IMPLEMENTATION
 // ==========================================
 
@@ -2464,6 +2542,44 @@ export const TournamentService = {
         }
       } catch (err) {
         console.warn('Error actualizando clasificación de fútbol en vivo:', err);
+      }
+    }
+
+    // 4.4. Respaldo FotMob: competiciones que el plan de Football-Data no cubre
+    // (p. ej. la Europa League en el plan gratuito). Sin token y con la misma
+    // fuente que las fichas de partido: partidos de la temporada y clasificación.
+    // También sustituye los datos de ejemplo de la semilla cuando no se ha
+    // conseguido nada en vivo (dataSource != 'live').
+    if (tournament.game === 'FÚTBOL') {
+      const isSeedData = baseDetail.dataSource !== 'live';
+      const needsMatches = isSeedData || !baseDetail.matches || baseDetail.matches.length === 0;
+      const needsStandings =
+        isSeedData || !baseDetail.standings || baseDetail.standings.length === 0;
+      if (needsMatches || needsStandings) {
+        try {
+          const league = await FootballStatsService.getLeagueDataByName(tournament.name);
+          if (league) {
+            if (needsStandings && league.standings && league.standings.length > 0) {
+              baseDetail.standings = [
+                {
+                  groupName: 'Clasificación General',
+                  table: league.standings.map(mapFotmobStandingRow),
+                },
+              ];
+            }
+            if (needsMatches && league.matches.length > 0) {
+              baseDetail.matches = league.matches.map((m) =>
+                mapFotmobLeagueMatch(m, effectiveTournament)
+              );
+            }
+            if (league.season) baseDetail.season = league.season;
+            if ((league.standings?.length || 0) > 0 || league.matches.length > 0) {
+              baseDetail.dataSource = 'live';
+            }
+          }
+        } catch (err) {
+          console.warn('Error consultando la competición en FotMob:', err);
+        }
       }
     }
 

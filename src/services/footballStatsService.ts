@@ -286,6 +286,245 @@ function cleanMinuteParts(short: unknown): { minute: number; injuryTime: number 
   return { minute, injuryTime: isNaN(injuryTime) ? null : injuryTime };
 }
 
+// ---------------------------------------------------------------------------
+// Competiciones completas (partidos y clasificación) de FotMob
+// ---------------------------------------------------------------------------
+
+/** Partido de la temporada de una competición en FotMob (`fixtures`). */
+export interface FotmobLeagueMatch {
+  id: number;
+  homeId?: number;
+  homeName: string;
+  homeShortName?: string;
+  homeLogo?: string;
+  awayId?: number;
+  awayName: string;
+  awayShortName?: string;
+  awayLogo?: string;
+  utcTime?: string;
+  started: boolean;
+  finished: boolean;
+  scoreA?: number;
+  scoreB?: number;
+}
+
+/** Fila de clasificación de una competición de FotMob (`table`). */
+export interface FotmobLeagueStandingRow {
+  position: number;
+  teamId?: number;
+  teamName: string;
+  shortName?: string;
+  teamLogo?: string;
+  played: number;
+  won: number;
+  draw: number;
+  lost: number;
+  points: number;
+  goalsFor: number;
+  goalsAgainst: number;
+  goalDifference: number;
+}
+
+/** Datos de una competición en FotMob: partidos de la temporada y tabla. */
+export interface FotmobLeagueData {
+  leagueId: number;
+  leagueName: string;
+  season?: string;
+  matches: FotmobLeagueMatch[];
+  standings?: FotmobLeagueStandingRow[];
+}
+
+/** "1 - 4" o "6-0" -> { a: 1, b: 4 }. */
+function parseScoreStr(value: unknown): { a: number; b: number } | null {
+  const m = String(value || '').match(/(\d+)\s*-\s*(\d+)/);
+  if (!m) return null;
+  return { a: parseInt(m[1], 10), b: parseInt(m[2], 10) };
+}
+
+/** URL del escudo de un equipo en FotMob. */
+export function fotmobTeamLogo(teamId?: number): string | undefined {
+  return typeof teamId === 'number' && teamId > 0
+    ? `https://images.fotmob.com/image_resources/logo/teamlogo/${teamId}.png`
+    : undefined;
+}
+
+/** Caché del id de FotMob por nombre de competición. */
+const LEAGUE_ID_CACHE = new Map<string, { ts: number; id: number | null }>();
+/** Caché de los datos (partidos + tabla) por id de competición. */
+const LEAGUE_DATA_CACHE = new Map<number, { ts: number; data: FotmobLeagueData }>();
+const LEAGUE_ID_HIT_TTL_MS = 24 * 60 * 60 * 1000;
+const LEAGUE_ID_MISS_TTL_MS = 30 * 60 * 1000;
+const LEAGUE_DATA_TTL_MS = 5 * 60 * 1000;
+
+/** Nombres de búsqueda alternativos para competiciones con otro nombre en FotMob. */
+const FOTMOB_LEAGUE_SEARCH_ALIASES: Record<string, string> = {
+  'laliga hypermotion': 'LaLiga2',
+  'segunda division': 'LaLiga2',
+};
+
+/** Clave de nombre de competición (sin siglas de confederación ni acentos). */
+function leagueKey(name: string): string {
+  return (name || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\b(uefa|conmebol|afc|caf|concacaf|ofc)\b/g, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** 0 = no casa, 1 = misma clave, 0.85 = contención (evita filiales/femeninas). */
+function leagueNameScore(candidate: string, target: string): number {
+  const cRaw = candidate || '';
+  const tRaw = target || '';
+  if (YOUTH_WORDS.test(cRaw) && !YOUTH_WORDS.test(tRaw)) return 0;
+  if (/qualification|qualifying/i.test(cRaw) && !/qualification|qualifying/i.test(tRaw)) return 0;
+  const c = leagueKey(cRaw);
+  const t = leagueKey(tRaw);
+  if (!c || !t) return 0;
+  if (c === t) return 1;
+  if (c.length >= 5 && t.length >= 5 && (c.includes(t) || t.includes(c))) return 0.85;
+  return 0;
+}
+
+/** Busca el id de FotMob de una competición por su nombre (o null). */
+async function findFotmobLeague(name: string): Promise<number | null> {
+  const key = leagueKey(name);
+  if (!key) return null;
+  const cached = LEAGUE_ID_CACHE.get(key);
+  if (cached) {
+    const ttl = cached.id ? LEAGUE_ID_HIT_TTL_MS : LEAGUE_ID_MISS_TTL_MS;
+    if (Date.now() - cached.ts < ttl) return cached.id;
+  }
+
+  const aliasTerm = FOTMOB_LEAGUE_SEARCH_ALIASES[key];
+  const term = aliasTerm || name;
+  // Con alias, la comparación se hace contra el término buscado (p. ej.
+  // "LaLiga2" para LaLiga Hypermotion), no contra el nombre del catálogo.
+  const target = aliasTerm || name;
+  const data = await fotmobFetch(
+    `/api/data/search/suggest?term=${encodeURIComponent(term)}&lang=en`
+  );
+  // El buscador devuelve grupos ([{ title, suggestions }]) o, en algunas
+  // respuestas, una única lista de sugerencias; se aceptan ambas formas.
+  const groups: any[] = Array.isArray(data)
+    ? data
+    : Array.isArray(data?.suggestions)
+    ? [{ suggestions: data.suggestions }]
+    : [];
+  const suggestions: any[] = groups.flatMap((g) =>
+    Array.isArray(g?.suggestions) ? g.suggestions : []
+  );
+  let best: { id: number; score: number } | null = null;
+  for (const s of suggestions) {
+    if (String(s?.type || '') !== 'league') continue;
+    const id = Number(s.id);
+    if (!Number.isFinite(id) || id <= 0) continue;
+    const score = leagueNameScore(String(s.name || ''), target);
+    if (score > 0 && (!best || score > best.score)) best = { id, score };
+  }
+  const found = best ? best.id : null;
+  LEAGUE_ID_CACHE.set(key, { ts: Date.now(), id: found });
+  if (LEAGUE_ID_CACHE.size > 120) {
+    const oldest = LEAGUE_ID_CACHE.keys().next().value;
+    if (oldest) LEAGUE_ID_CACHE.delete(oldest);
+  }
+  return found;
+}
+
+/** Partidos de la temporada y clasificación de una competición de FotMob. */
+async function fetchFotmobLeagueData(leagueId: number): Promise<FotmobLeagueData | null> {
+  const cached = LEAGUE_DATA_CACHE.get(leagueId);
+  if (cached && Date.now() - cached.ts < LEAGUE_DATA_TTL_MS) return cached.data;
+
+  const [fixturesRes, tableRes] = await Promise.all([
+    fotmobFetch(`/api/data/leagues?id=${leagueId}&tab=fixtures&type=fixtures`),
+    fotmobFetch(`/api/data/leagues?id=${leagueId}&tab=table`),
+  ]);
+  if (!fixturesRes && !tableRes) return cached ? cached.data : null;
+
+  const details = fixturesRes?.details || tableRes?.table?.[0]?.data || {};
+  const season =
+    typeof details?.selectedSeason === 'string' && details.selectedSeason
+      ? details.selectedSeason
+      : undefined;
+  const leagueName =
+    typeof details?.name === 'string' && details.name
+      ? details.name
+      : typeof tableRes?.table?.[0]?.data?.leagueName === 'string'
+      ? tableRes.table[0].data.leagueName
+      : '';
+
+  const matches: FotmobLeagueMatch[] = [];
+  const rawMatches = fixturesRes?.fixtures?.allMatches;
+  if (Array.isArray(rawMatches)) {
+    for (const m of rawMatches) {
+      if (!m || m.status?.cancelled) continue;
+      const id = Number(m.id);
+      if (!Number.isFinite(id) || id <= 0) continue;
+      const homeId = Number(m.home?.id) || undefined;
+      const awayId = Number(m.away?.id) || undefined;
+      const score = parseScoreStr(m.status?.scoreStr);
+      matches.push({
+        id,
+        homeId,
+        homeName: String(m.home?.name || ''),
+        homeShortName: m.home?.shortName ? String(m.home.shortName) : undefined,
+        homeLogo: fotmobTeamLogo(homeId),
+        awayId,
+        awayName: String(m.away?.name || ''),
+        awayShortName: m.away?.shortName ? String(m.away.shortName) : undefined,
+        awayLogo: fotmobTeamLogo(awayId),
+        utcTime: typeof m.status?.utcTime === 'string' ? m.status.utcTime : undefined,
+        started: Boolean(m.status?.started),
+        finished: Boolean(m.status?.finished),
+        scoreA: score?.a,
+        scoreB: score?.b,
+      });
+    }
+  }
+
+  const standings: FotmobLeagueStandingRow[] = [];
+  const tableAll = tableRes?.table?.[0]?.data?.table?.all;
+  if (Array.isArray(tableAll)) {
+    for (const row of tableAll) {
+      if (!row || typeof row.name !== 'string' || !row.name) continue;
+      const teamId = Number(row.id) || undefined;
+      const goals = parseScoreStr(row.scoresStr);
+      standings.push({
+        position: Number(row.idx) || standings.length + 1,
+        teamId,
+        teamName: row.name,
+        shortName: row.shortName ? String(row.shortName) : undefined,
+        teamLogo: fotmobTeamLogo(teamId),
+        played: Number(row.played) || 0,
+        won: Number(row.wins) || 0,
+        draw: Number(row.draws) || 0,
+        lost: Number(row.losses) || 0,
+        points: Number(row.pts) || 0,
+        goalsFor: goals?.a ?? 0,
+        goalsAgainst: goals?.b ?? 0,
+        goalDifference: Number(row.goalConDiff) || 0,
+      });
+    }
+  }
+
+  const data: FotmobLeagueData = {
+    leagueId,
+    leagueName,
+    season,
+    matches,
+    standings: standings.length > 0 ? standings : undefined,
+  };
+  LEAGUE_DATA_CACHE.set(leagueId, { ts: Date.now(), data });
+  if (LEAGUE_DATA_CACHE.size > 40) {
+    const oldest = LEAGUE_DATA_CACHE.keys().next().value;
+    if (oldest) LEAGUE_DATA_CACHE.delete(oldest);
+  }
+  return data;
+}
+
 /** Motivos de baja de FotMob (`unavailability.type`) al castellano. */
 const UNAVAILABLE_REASON_ES: Record<string, string> = {
   injury: 'Lesión',
@@ -528,6 +767,18 @@ export const FootballStatsService = {
       if (oldest) DETAIL_CACHE.delete(oldest);
     }
     return detail;
+  },
+
+  /**
+   * Datos de una competición completa en FotMob (partidos de la temporada y
+   * clasificación), buscándola por nombre. Es el respaldo para competiciones
+   * que el plan de Football-Data no cubre (p. ej. la Europa League en el plan
+   * gratuito) y no necesita token.
+   */
+  async getLeagueDataByName(name: string): Promise<FotmobLeagueData | null> {
+    const leagueId = await findFotmobLeague(name);
+    if (!leagueId) return null;
+    return fetchFotmobLeagueData(leagueId);
   },
 
   /**
