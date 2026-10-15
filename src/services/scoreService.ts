@@ -101,6 +101,64 @@ async function fetchPandaEndpoint(token: string, endpoint: string): Promise<any[
   return [];
 }
 
+/** Nombre en minúsculas, sin acentos y con espacios simples (comparación). */
+function asciiName(value: string): string {
+  return (value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Normaliza el nombre base de un club/equipo para comparar:
+ * - sin acentos ni signos,
+ * - sin prefijos de club encadenados ("RCD", "FC", "Team"...),
+ * - sin sufijo de ciudad ("Espanyol de Barcelona" -> "Espanyol"),
+ * - con alias de grafía ("Barça" -> "Barcelona", "Giants" -> "GiantX").
+ *
+ * Así "FC Barcelona" ~ "Barcelona" pero "RCD Espanyol de Barcelona" NO es el
+ * Barça (antes se marcaba por contener la palabra "barcelona").
+ */
+function normalizeClubName(value: string): string {
+  let v = (value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+  v = v.replace(/\bbarca\b/g, 'barcelona').replace(/\bgiants\b/g, 'giantx');
+  const prefixes = /^(?:fc|cf|rcd|rc|ca|ud|cd|sd|club|deportivo|sporting|real|atlético|atletico|racing|team)\s+/;
+  let prev = '';
+  while (v && v !== prev) {
+    prev = v;
+    v = v.replace(prefixes, '');
+  }
+  v = v.replace(/(?:^|\s)(?:de|del)\s+.*$/, '');
+  return v.trim();
+}
+
+/**
+ * ¿`needle` aparece como palabra completa en `hay`? Se descartan las
+ * coincidencias que son solo la ciudad del club ("Barcelona" dentro de
+ * "RCD Espanyol de Barcelona" o "Madrid" dentro de "Atlético de Madrid").
+ */
+function wordMatch(hay: string, needle: string): boolean {
+  if (!hay || !needle || needle.length < 3) return false;
+  let idx = hay.indexOf(needle);
+  while (idx >= 0) {
+    const before = idx === 0 ? ' ' : hay[idx - 1];
+    const after = idx + needle.length >= hay.length ? ' ' : hay[idx + needle.length];
+    if (!/[a-z0-9]/.test(before) && !/[a-z0-9]/.test(after)) {
+      const prefix = hay.slice(0, idx).trimEnd();
+      if (!/\b(?:de|del)$/.test(prefix)) return true;
+    }
+    idx = hay.indexOf(needle, idx + 1);
+  }
+  return false;
+}
+
 export function isTeamFavorite(
   teamName?: string,
   shortName?: string,
@@ -111,20 +169,24 @@ export function isTeamFavorite(
   const tn = teamName.toLowerCase().trim();
   const sn = (shortName || '').toLowerCase().trim();
   const tid = (teamId || '').toLowerCase().trim();
+  const tnAscii = asciiName(teamName);
+  const tnNorm = normalizeClubName(teamName);
 
   return favorites.some((fav) => {
     const f = fav.toLowerCase().trim();
     if (!f) return false;
     if (f === tn || (sn && f === sn) || (tid && f === tid)) return true;
-    if (f.length >= 3 && (tn.includes(f) || f.includes(tn))) return true;
-    if (sn && sn === f) return true;
-    // Reconocimiento de alias comunes de clubes
-    if ((tn.includes('barcelona') || tn.includes('barça')) && (f.includes('barcelona') || f.includes('barça'))) return true;
-    if (tn.includes('real madrid') && f.includes('real madrid')) return true;
-    if (tn.includes('heretics') && f.includes('heretics')) return true;
-    if (tn.includes('giantx') && (f.includes('giantx') || f.includes('giants'))) return true;
-    if (tn.includes('koi') && f.includes('koi')) return true;
-    return false;
+
+    const fAscii = asciiName(f);
+    if (fAscii && tnAscii && fAscii === tnAscii) return true;
+
+    // Nombre base del club: "FC Barcelona" ~ "Barcelona"; "Espanyol" ~
+    // "RCD Espanyol de Barcelona"; "Heretics" ~ "Team Heretics".
+    const fNorm = normalizeClubName(f);
+    if (fNorm.length >= 3 && tnNorm.length >= 3 && fNorm === tnNorm) return true;
+
+    // Palabra completa en cualquiera de los dos nombres, sin contar ciudades.
+    return wordMatch(tnAscii, fAscii) || wordMatch(fAscii, tnAscii);
   });
 }
 
@@ -139,26 +201,12 @@ export function toggleTeamFavorite(
   const isFav = isTeamFavorite(tName, tShort, favorites, tId);
 
   if (isFav) {
-    const tNameLower = tName.toLowerCase().trim();
-    const tShortLower = (tShort || '').toLowerCase().trim();
-    const tIdLower = (tId || '').toLowerCase().trim();
-
-    return favorites.filter((fav) => {
-      const f = fav.toLowerCase().trim();
-      if (!f) return false;
-      if (f === tNameLower || f === tShortLower || f === tIdLower) return false;
-      if (f.length >= 3 && (tNameLower.includes(f) || f.includes(tNameLower))) return false;
-      if (tShortLower && (tShortLower === f || (f.length >= 3 && tShortLower.includes(f)))) return false;
-      if ((tNameLower.includes('barcelona') || tNameLower.includes('barça')) && (f.includes('barcelona') || f.includes('barça'))) return false;
-      if (tNameLower.includes('real madrid') && f.includes('real madrid')) return false;
-      if (tNameLower.includes('heretics') && f.includes('heretics')) return false;
-      if (tNameLower.includes('giantx') && (f.includes('giantx') || f.includes('giants'))) return false;
-      if (tNameLower.includes('koi') && f.includes('koi')) return false;
-      return true;
-    });
-  } else {
-    return [...favorites, tName];
+    // Simetría exacta con el encendido: se eliminan solo los favoritos que
+    // casan con este equipo con las mismas reglas (evita borrar favoritos de
+    // otros clubes por coincidencias de ciudad).
+    return favorites.filter((fav) => !isTeamFavorite(tName, tShort, [fav], tId));
   }
+  return [...favorites, tName];
 }
 
 /**
@@ -452,9 +500,22 @@ export function toggleTournamentFavorite(
 }
 
 
+/**
+ * Normaliza y canonicaliza los favoritos de torneos.
+ *
+ * Además de los alias históricos, cada favorito que se reconoce en el catálogo
+ * maestro se guarda como ID + nombre canónicos: así la estrella, los partidos,
+ * las alertas y el reloj comparten una única identidad y desaparecen los
+ * "favoritos fantasma" o duplicados por variantes con año/split.
+ */
 export function normalizeFavoriteTournaments(favorites: string[]): string[] {
   if (!favorites || favorites.length === 0) return [];
   const result: string[] = [];
+  const push = (value?: string) => {
+    const v = (value || '').trim();
+    if (!v) return;
+    if (!result.some((r) => r.toLowerCase() === v.toLowerCase())) result.push(v);
+  };
 
   for (const fav of favorites) {
     const f = fav.trim();
@@ -462,28 +523,110 @@ export function normalizeFavoriteTournaments(favorites: string[]): string[] {
     const lower = f.toLowerCase();
 
     if (lower === 'vct') {
-      if (!result.includes('Valorant Champions')) result.push('Valorant Champions');
-      if (!result.includes('VCT Masters')) result.push('VCT Masters');
-      if (!result.includes('VCT EMEA')) result.push('VCT EMEA');
-    } else if (lower === 'laliga' || lower === 'primera division') {
-      if (!result.includes('LaLiga EA Sports')) result.push('LaLiga EA Sports');
-    } else if (lower === 'champions league' || lower === 'champions') {
-      if (!result.includes('UEFA Champions League')) result.push('UEFA Champions League');
-    } else if (lower === 'lec') {
-      if (!result.includes('LEC (League of Legends EMEA Championship)')) {
-        result.push('LEC (League of Legends EMEA Championship)');
-      }
-    } else {
-      if (!result.includes(f)) result.push(f);
+      push('Valorant Champions');
+      push('VCT Masters');
+      push('VCT EMEA');
+      continue;
     }
+
+    // IDs dinámicos (búsqueda online / torneos sin catálogo): se conservan.
+    if (lower.startsWith('panda-') || lower.startsWith('dyn-')) {
+      push(f);
+      continue;
+    }
+
+    // Canonicalizar al torneo maestro si se reconoce (id + nombre).
+    const master = findMasterTournamentForFavorite(f);
+    if (master) {
+      push(master.id);
+      push(master.name);
+      continue;
+    }
+
+    push(f);
   }
 
   return result;
 }
 
+/**
+ * Normaliza ambas listas de favoritos a la vez y corrige datos heredados
+ * guardados en la lista equivocada (p. ej. un equipo como "Espanyol" dentro de
+ * torneos, o un torneo como "LaLiga" dentro de equipos). Devuelve cada entrada
+ * en su lista correcta y canonicalizada.
+ */
+export function normalizeFavoriteLists(
+  tournaments: string[],
+  teams: string[]
+): { tournaments: string[]; teams: string[] } {
+  const migratedTournaments: string[] = [...(tournaments || [])];
+  const migratedTeams: string[] = [...(teams || [])];
+
+  const isDynamicId = (value: string) =>
+    value.startsWith('panda-') || value.startsWith('dyn-');
+
+  const findKnownTeam = (favorite: string): TeamCatalogItem | null => {
+    const lower = favorite.toLowerCase().trim();
+    const exact = MASTER_TEAMS.find(
+      (t) =>
+        t.id.toLowerCase() === lower ||
+        t.name.toLowerCase() === lower ||
+        (t.shortName && t.shortName.toLowerCase() === lower)
+    );
+    return (
+      exact ||
+      MASTER_TEAMS.find((t) => isTeamFavorite(t.name, t.shortName, [favorite], t.id)) ||
+      null
+    );
+  };
+
+  // Torneos que en realidad son equipos -> se migran a equipos.
+  for (const fav of tournaments || []) {
+    const f = (fav || '').trim();
+    if (!f || isDynamicId(f.toLowerCase())) continue;
+    if (findMasterTournamentForFavorite(f)) continue;
+    if (findKnownTeam(f)) {
+      const idx = migratedTournaments.findIndex((v) => v.toLowerCase().trim() === f.toLowerCase());
+      if (idx >= 0) migratedTournaments.splice(idx, 1);
+      if (!migratedTeams.some((v) => v.toLowerCase().trim() === f.toLowerCase())) {
+        migratedTeams.push(f);
+      }
+    }
+  }
+
+  // Equipos que en realidad son torneos -> se migran a torneos.
+  for (const fav of teams || []) {
+    const f = (fav || '').trim();
+    if (!f || isDynamicId(f.toLowerCase())) continue;
+    if (findKnownTeam(f)) continue;
+    if (findMasterTournamentForFavorite(f)) {
+      const idx = migratedTeams.findIndex((v) => v.toLowerCase().trim() === f.toLowerCase());
+      if (idx >= 0) migratedTeams.splice(idx, 1);
+      if (!migratedTournaments.some((v) => v.toLowerCase().trim() === f.toLowerCase())) {
+        migratedTournaments.push(f);
+      }
+    }
+  }
+
+  return {
+    tournaments: normalizeFavoriteTournaments(migratedTournaments),
+    teams: normalizeFavoriteTeams(migratedTeams),
+  };
+}
+
+/**
+ * Normaliza y canonicaliza los favoritos de equipos: los alias comunes y los
+ * nombres que coinciden con un equipo del catálogo maestro se guardan con su
+ * nombre canónico (p. ej. "Espanyol" -> "RCD Espanyol").
+ */
 export function normalizeFavoriteTeams(favorites: string[]): string[] {
   if (!favorites || favorites.length === 0) return [];
   const result: string[] = [];
+  const push = (value?: string) => {
+    const v = (value || '').trim();
+    if (!v) return;
+    if (!result.some((r) => r.toLowerCase() === v.toLowerCase())) result.push(v);
+  };
 
   for (const fav of favorites) {
     const f = fav.trim();
@@ -491,12 +634,35 @@ export function normalizeFavoriteTeams(favorites: string[]): string[] {
     const lower = f.toLowerCase();
 
     if (lower === 'barcelona' || lower === 'barça') {
-      if (!result.includes('FC Barcelona')) result.push('FC Barcelona');
-    } else if (lower === 'giantx' || lower === 'giants') {
-      if (!result.includes('GiantX')) result.push('GiantX');
-    } else {
-      if (!result.includes(f)) result.push(f);
+      push('FC Barcelona');
+      continue;
     }
+    if (lower === 'giantx' || lower === 'giants') {
+      push('GiantX');
+      continue;
+    }
+
+    // IDs dinámicos de búsqueda online: se conservan.
+    if (lower.startsWith('panda-') || lower.startsWith('dyn-')) {
+      push(f);
+      continue;
+    }
+
+    // Canonicalizar contra el catálogo maestro (exacto primero, luego difuso).
+    const exact = MASTER_TEAMS.find(
+      (t) =>
+        t.id.toLowerCase() === lower ||
+        t.name.toLowerCase() === lower ||
+        (t.shortName && t.shortName.toLowerCase() === lower)
+    );
+    const known =
+      exact || MASTER_TEAMS.find((t) => isTeamFavorite(t.name, t.shortName, [f], t.id));
+    if (known) {
+      push(known.name);
+      continue;
+    }
+
+    push(f);
   }
 
   return result;
@@ -956,6 +1122,9 @@ export function resolveMasterTournamentId(
       }
       case 'FÚTBOL': {
         const c = (competitionCode || '').toUpperCase();
+        // La Segunda División se comprueba antes que LaLiga: "LaLiga
+        // Hypermotion" contiene "laliga" y no debe abrir la primera división.
+        if (c === 'SD' || text.includes('hypermotion') || text.includes('segunda division')) return 'foot-SD';
         if (c === 'CL' || text.includes('champions league')) return 'foot-CL';
         if (c === 'PD' || text.includes('laliga') || text.includes('primera division')) return 'foot-PD';
         if (c === 'PL' || text.includes('premier league')) return 'foot-PL';
@@ -975,15 +1144,29 @@ export function resolveMasterTournamentId(
   // específica (la más larga). Esto cubre torneos que no tienen patrón propio
   // (p. ej. "EMEA Masters", "Superliga LVP", etc.) para que el favorito por ID
   // sea fiable y quitar un torneo lo oculte de verdad.
+  // La comparación es por palabra completa: sin esto, "Championship" (Segunda
+  // inglesa) casaba con "Champions" (UCL) y sus partidos se colaban en la UCL.
+  const includesWord = (haystack: string, needle: string) => {
+    if (!needle || needle.length < 3) return false;
+    let idx = haystack.indexOf(needle);
+    while (idx >= 0) {
+      const before = idx === 0 ? ' ' : haystack[idx - 1];
+      const after = idx + needle.length >= haystack.length ? ' ' : haystack[idx + needle.length];
+      if (!/[a-z0-9]/.test(before) && !/[a-z0-9]/.test(after)) return true;
+      idx = haystack.indexOf(needle, idx + 1);
+    }
+    return false;
+  };
+
   let best: { id: string; len: number } | null = null;
   for (const mt of MASTER_TOURNAMENTS) {
     if (mt.game !== game) continue;
     const variants = [mt.name, mt.shortName, mt.slug]
       .filter((v): v is string => Boolean(v))
       .map((v) => v.toLowerCase().trim())
-      .filter((v) => v.length >= 4);
+      .filter((v) => v.length >= 3);
     for (const v of variants) {
-      if (text.includes(v) && (!best || v.length > best.len)) {
+      if (includesWord(text, v) && (!best || v.length > best.len)) {
         best = { id: mt.id, len: v.length };
       }
     }
@@ -1988,6 +2171,57 @@ export const MASTER_TOURNAMENTS: TournamentItem[] = [
     leagueId: 4213,
     externalId: '9508',
     description: 'Liga española de League of Legends organizada por LVP',
+  },
+  {
+    // Sin leagueId: la liga se resuelve por nombre en PandaScore.
+    id: 'lol-lfl',
+    name: 'LFL',
+    shortName: 'LFL',
+    slug: 'lfl',
+    game: 'LOL',
+    tier: 'A',
+    region: 'EMEA',
+    description: 'La Ligue Française — liga francesa de League of Legends',
+  },
+  {
+    id: 'lol-prime-league',
+    name: 'Prime League',
+    shortName: 'Prime League',
+    slug: 'prime-league',
+    game: 'LOL',
+    tier: 'A',
+    region: 'EMEA',
+    description: 'Liga alemana de League of Legends',
+  },
+  {
+    id: 'lol-tcl',
+    name: 'TCL',
+    shortName: 'TCL',
+    slug: 'tcl',
+    game: 'LOL',
+    tier: 'A',
+    region: 'EMEA',
+    description: 'Turkish Championship League — liga turca de League of Legends',
+  },
+  {
+    id: 'lol-cblol',
+    name: 'CBLOL',
+    shortName: 'CBLOL',
+    slug: 'cblol',
+    game: 'LOL',
+    tier: 'A',
+    region: 'AMERICAS',
+    description: 'Campeonato Brasileiro de League of Legends',
+  },
+  {
+    id: 'lol-lcp',
+    name: 'LCP',
+    shortName: 'LCP',
+    slug: 'lcp',
+    game: 'LOL',
+    tier: 'A',
+    region: 'ASIA',
+    description: 'League of Legends Championship Pacific',
   },
   {
     id: 'lol-emea-masters',
@@ -3608,6 +3842,24 @@ export const ScoreService = {
       }
     }
 
+    // Cobertura dirigida de torneos favoritos: con el volumen de LoL/CS2, los
+    // próximos partidos de una liga favorita podían quedar fuera del top global
+    // de "upcoming". Se consulta directamente su liga (deduplicando leagueId:
+    // todo el circuito VCT comparte liga) sin disparar el número de peticiones.
+    const favLeagueIds = new Set<number | string>();
+    for (const fav of favoriteTournaments || []) {
+      if (favLeagueIds.size >= 3) break;
+      const master = findMasterTournamentForFavorite(fav);
+      if (master?.leagueId !== undefined && master.leagueId !== null) {
+        favLeagueIds.add(master.leagueId);
+      }
+    }
+    for (const leagueId of favLeagueIds) {
+      endpointsToFetch.push(
+        `/leagues/${leagueId}/matches?filter[status]=not_started&per_page=10&sort=begin_at`
+      );
+    }
+
     // Ejecutar todas las peticiones en paralelo de alta velocidad
     const rawResponses = await Promise.all(endpointsToFetch.map((ep) => safeFetch(ep)));
     const combinedRaw = rawResponses.flat();
@@ -3669,7 +3921,14 @@ export const ScoreService = {
 
       const matchDateIso = item.begin_at || item.scheduled_at || item.end_at || null;
       const schedule = formatMatchSchedule(matchDateIso, status);
-      const timeInfo = status === 'FINISHED' ? `${scoreA} - ${scoreB}` : 'EN DIRECTO';
+      // Próximos: fecha/hora real ("Mañana 21:00h"), no "EN DIRECTO" (la ficha
+      // de equipo mostraba el estado en directo en partidos aún por jugar).
+      const timeInfo =
+        status === 'FINISHED'
+          ? `${scoreA} - ${scoreB}`
+          : status === 'LIVE'
+          ? 'EN DIRECTO'
+          : schedule.badgeText || 'Programado';
 
       const leagueName = (item.league?.name || '').trim();
       const serieName = (item.serie?.full_name || item.serie?.name || '').trim();
@@ -4127,8 +4386,28 @@ export const ScoreService = {
       }
     }
 
-    const rawMatches = data && Array.isArray(data.matches) ? data.matches : [];
-    return rawMatches.map(mapFootballDataMatch);
+    const rawMatches: any[] = data && Array.isArray(data.matches) ? data.matches : [];
+    const mapped: Match[] = rawMatches.map(mapFootballDataMatch);
+
+    // Una temporada completa (300+ partidos) hacía la pestaña de partidos muy
+    // lenta. Se limita a una ventana útil: directos + próximos + resultados
+    // recientes. La clasificación y los participantes usan endpoints aparte.
+    const byDateAsc = (a: Match, b: Match) =>
+      new Date(a.startTimeIso).getTime() - new Date(b.startTimeIso).getTime();
+    const byDateDesc = (a: Match, b: Match) =>
+      new Date(b.startTimeIso).getTime() - new Date(a.startTimeIso).getTime();
+
+    const live = mapped.filter((m) => m.status === 'LIVE');
+    const upcoming = mapped
+      .filter((m) => m.status === 'UPCOMING')
+      .sort(byDateAsc)
+      .slice(0, 20);
+    const finished = mapped
+      .filter((m) => m.status === 'FINISHED')
+      .sort(byDateDesc)
+      .slice(0, 20);
+
+    return [...live, ...upcoming, ...finished];
   },
 
   async fetchLiveVlrMatches(): Promise<Match[]> {
@@ -4722,17 +5001,20 @@ export const ScoreService = {
   },
 
   /**
-   * Búsqueda en vivo de equipos adicionales en PandaScore.
+   * Búsqueda en vivo de equipos adicionales en PandaScore (esports) y
+   * Football-Data.org (clubes de fútbol).
    */
   async searchOnlineTeams(
     query: string,
-    pandaToken?: string
+    pandaToken?: string,
+    footballToken?: string
   ): Promise<TeamCatalogItem[]> {
     const q = (query || '').trim();
     if (!q || q.length < 2) return [];
 
     const results: TeamCatalogItem[] = [];
     const cleanPanda = (pandaToken || '').trim();
+    const cleanFootball = (footballToken || '').trim();
 
     if (cleanPanda) {
       try {
@@ -4769,6 +5051,53 @@ export const ScoreService = {
         }
       } catch (err) {
         console.warn('Error searching online teams:', err);
+      }
+    }
+
+    // Football-Data.org: búsqueda de clubes por nombre. Se verifica en cliente
+    // (por si el endpoint ignora el filtro) y se descartan los equipos que ya
+    // están en el catálogo maestro.
+    if (cleanFootball) {
+      try {
+        const path = `/v4/teams?name=${encodeURIComponent(q)}&limit=50`;
+        let data: any = null;
+
+        if (Platform.OS === 'web') {
+          try {
+            const proxyUrl = `/api/proxy/football?token=${encodeURIComponent(cleanFootball)}&path=${encodeURIComponent(path)}`;
+            const res = await fetch(proxyUrl);
+            if (res.ok) data = await res.json();
+          } catch {}
+        }
+
+        if (!data) {
+          const res = await fetch(`https://api.football-data.org${path}`, {
+            headers: { 'X-Auth-Token': cleanFootball, Accept: 'application/json' },
+          });
+          if (res.ok) data = await res.json();
+        }
+
+        const teams = data && Array.isArray(data.teams) ? data.teams : [];
+        const qTokens = q.toLowerCase().split(/\s+/).filter(Boolean);
+        for (const t of teams) {
+          const name = (t?.name || '').trim();
+          if (!name) continue;
+          const haystack = `${name} ${t.tla || ''} ${t.shortName || ''}`.toLowerCase();
+          if (!qTokens.every((tok) => haystack.includes(tok))) continue;
+          if (MASTER_TEAMS.some((mt) => mt.name.toLowerCase() === name.toLowerCase())) continue;
+          if (results.some((r) => r.name.toLowerCase() === name.toLowerCase())) continue;
+          results.push({
+            id: `football-team-${t.id}`,
+            name,
+            shortName: t.tla || t.shortName || undefined,
+            logo: t.crest || undefined,
+            game: 'FÚTBOL',
+            externalId: t.id,
+            location: t.area?.name || undefined,
+          });
+        }
+      } catch (err) {
+        console.warn('Error searching Football-Data online teams:', err);
       }
     }
 
@@ -4828,7 +5157,7 @@ export const ScoreService = {
     // Coincidencia por palabra completa (evita que "VCT" incluya partidos de
     // cualquier evento VCT, como cuando se abría Masters con el texto genérico).
     const containsWord = (haystack: string, needle: string) => {
-      if (!needle || needle.length < 4) return false;
+      if (!needle || needle.length < 3) return false;
       const idx = haystack.indexOf(needle);
       if (idx < 0) return false;
       const before = idx === 0 ? ' ' : haystack[idx - 1];
@@ -4856,10 +5185,18 @@ export const ScoreService = {
         return true;
       }
       if (tSlug && containsWord(ml, tSlug)) return true;
-      if ((tournament.id === 'foot-PD' || tShort === 'laliga') && (ml.includes('laliga') || ml.includes('primera division'))) {
+      // Alias con coincidencia estricta: "championship" (Segunda inglesa) no
+      // debe colarse como UCL por contener "champions".
+      if (
+        (tournament.id === 'foot-PD' || tShort === 'laliga') &&
+        ((ml.includes('laliga') && !ml.includes('hypermotion')) || ml.includes('primera division'))
+      ) {
         return true;
       }
-      if ((tournament.id === 'foot-CL' || tShort === 'champions') && (ml.includes('champions') || ml.includes('uefa'))) {
+      if (
+        (tournament.id === 'foot-CL' || tShort === 'champions') &&
+        (ml.includes('champions league') || ml.includes('uefa champions'))
+      ) {
         return true;
       }
       if (tShort === 'lec' && ml.includes('lec')) return true;
@@ -4877,6 +5214,7 @@ export const ScoreService = {
   toggleTeamFavorite,
   normalizeFavoriteTournaments,
   normalizeFavoriteTeams,
+  normalizeFavoriteLists,
   resolveMasterTournamentId,
   getDefaultFavoriteTournaments,
   findMasterTournamentForFavorite,

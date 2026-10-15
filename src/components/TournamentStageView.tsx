@@ -1,17 +1,21 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
-import { TournamentStage, SportCategory, BracketMatch } from '../services/types';
+import { TournamentStage, SportCategory, BracketMatch, Match } from '../services/types';
 import { TournamentStandingsTable } from './TournamentStandingsTable';
 import { TournamentBracketView } from './TournamentBracketView';
 import { TournamentSwissView } from './TournamentSwissView';
+import { TournamentTeamsView } from './TournamentTeamsView';
+import { MatchCard } from './MatchCard';
 import { HtzCard } from './htz';
 import { htzTokens } from './htz/tokens';
-import { Trophy } from 'lucide-react-native';
+import { Trophy, Calendar } from 'lucide-react-native';
 
 interface TournamentStageViewProps {
   stage: TournamentStage;
   game: SportCategory;
   onSelectMatch: (match: BracketMatch) => void;
+  /** Selección de un partido real de la fase (fallback sin tabla ni cuadro). */
+  onSelectStageMatch?: (match: Match) => void;
 }
 
 /**
@@ -22,14 +26,47 @@ export const TournamentStageView: React.FC<TournamentStageViewProps> = ({
   stage,
   game,
   onSelectMatch,
+  onSelectStageMatch,
 }) => {
   const hasSwiss = Boolean(stage.swissRounds && stage.swissRounds.length > 0);
   const hasStandings = Boolean(stage.standings && stage.standings.length > 0);
   const hasBracket = Boolean(
     stage.bracket && (stage.bracket.upperRounds?.length || stage.bracket.grandFinal)
   );
+  const stageMatches = stage.matches || [];
 
   if (!hasSwiss && !hasStandings && !hasBracket) {
+    // Fase sin tabla/cuadro: si los cruces aún no tienen equipos, se muestran
+    // los equipos confirmados de la fase; si hay cruces reales, los partidos.
+    const hasRealMatches = stageMatches.some(
+      (m) => m.teamA.name !== 'TBD' && m.teamB.name !== 'TBD'
+    );
+    if (hasRealMatches && onSelectStageMatch) {
+      return (
+        <View style={styles.container}>
+          <View style={styles.sectionHeader}>
+            <Calendar size={14} color={htzTokens.colors.primary} />
+            <Text style={styles.sectionTitle}>Partidos de la fase</Text>
+          </View>
+          <View style={{ gap: 8 }}>
+            {stageMatches.map((m) => (
+              <MatchCard key={m.id} match={m} onPress={() => onSelectStageMatch(m)} />
+            ))}
+          </View>
+        </View>
+      );
+    }
+    if (stage.participants && stage.participants.length > 0) {
+      return (
+        <View style={styles.container}>
+          <View style={styles.sectionHeader}>
+            <Trophy size={14} color={htzTokens.colors.primary} />
+            <Text style={styles.sectionTitle}>Equipos confirmados de la fase</Text>
+          </View>
+          <TournamentTeamsView participants={stage.participants} game={game} />
+        </View>
+      );
+    }
     return (
       <HtzCard style={styles.emptyCard}>
         <Trophy size={28} color={htzTokens.colors.outline} />

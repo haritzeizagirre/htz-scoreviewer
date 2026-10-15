@@ -269,6 +269,12 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
     }
   };
 
+  // Clic en un partido real de una fase (fallback de fases sin tabla/cuadro)
+  const handleStageMatchPress = (m: Match) => {
+    if (onSelectMatchExternal) onSelectMatchExternal(m);
+    else setSelectedMatch(m);
+  };
+
   // Pestañas: una por fase real del torneo (Play-In, Suiza, Playoffs...) o,
   // para torneos sin fases, Clasificación / Cuadro solo si existen de verdad.
   const availableTabIds: string[] = [
@@ -544,6 +550,7 @@ export const TournamentDetailView: React.FC<TournamentDetailViewProps> = ({
             stage={activeStage}
             game={detail.game}
             onSelectMatch={handleBracketMatchPress}
+            onSelectStageMatch={handleStageMatchPress}
           />
         )}
 

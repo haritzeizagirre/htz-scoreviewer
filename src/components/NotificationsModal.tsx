@@ -278,6 +278,32 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
     const game = scope === 'teams' ? group.game ?? resolveTeamGame(group.label) : group.game;
     const statusLabel = isMuted ? 'Silenciado' : hasCustom ? 'Personalizado' : 'General';
 
+    /** Elimina por completo este favorito (todas sus variantes guardadas). */
+    const removeFavorite = () => {
+      const isMember = (value: string) =>
+        group.members.some((m) => m.toLowerCase().trim() === value.toLowerCase().trim());
+      if (scope === 'teams') {
+        const nextTeams = (config.favoriteTeams || []).filter((t) => !isMember(t));
+        const nextOverrides = { ...settings.teams };
+        delete nextOverrides[group.key];
+        onUpdateConfig({
+          ...config,
+          favoriteTeams: nextTeams,
+          notifications: { ...settings, teams: nextOverrides },
+        });
+      } else {
+        const nextTournaments = (config.favoriteTournaments || []).filter((t) => !isMember(t));
+        const nextOverrides = { ...settings.tournaments };
+        delete nextOverrides[group.key];
+        onUpdateConfig({
+          ...config,
+          favoriteTournaments: nextTournaments,
+          notifications: { ...settings, tournaments: nextOverrides },
+        });
+      }
+      onNotify(`${group.label} eliminado de favoritos`);
+    };
+
     return (
       <View key={`${scope}:${group.key}`} style={styles.favBlock}>
         <View style={styles.favRow}>
@@ -305,6 +331,15 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
             ) : (
               <ChevronDown size={15} color={htzTokens.colors.outline} />
             )}
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.favRemoveBtn}
+            onPress={removeFavorite}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityRole="button"
+            accessibilityLabel={`Quitar ${group.label} de favoritos`}
+          >
+            <X size={16} color={htzTokens.colors.outline} />
           </TouchableOpacity>
           <Switch
             style={styles.favSwitch}
@@ -828,6 +863,9 @@ const styles = StyleSheet.create({
   },
   favSwitch: {
     marginLeft: 2,
+  },
+  favRemoveBtn: {
+    padding: 4,
   },
   favLabel: {
     flex: 1,

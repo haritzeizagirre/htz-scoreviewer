@@ -23,7 +23,7 @@ import { ScoreService, areTeamsMatching } from './scoreService';
 // ==========================================
 const MEMORY_CACHE = new Map<string, { data: TournamentFullDetail; timestamp: number }>();
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutos para datos en directo
-const STORAGE_PREFIX = 'sv_tourn_detail_real_v15_';
+const STORAGE_PREFIX = 'sv_tourn_detail_real_v17_';
 // Caducidad de la caché persistida del detalle de torneo (12 h): evita mostrar
 // clasificaciones o partidos viejos indefinidamente entre versiones de la clave.
 const STORAGE_DETAIL_TTL_MS = 12 * 60 * 60 * 1000;
@@ -1089,6 +1089,90 @@ function completeParticipantsWithStandings(
   return fromStandings.length > current.length ? fromStandings : current;
 }
 
+/**
+ * Completa los participantes del torneo con los equipos oficiales de cada fase
+ * (`/tournaments/{id}/teams`). Es necesario cuando los cruces futuros son
+ * "TBD": los partidos no permiten deducir todos los equipos, pero la API sí
+ * conoce los participantes confirmados de cada fase (p. ej. Worlds: los
+ * equipos de la fase suiza y de playoffs antes de que se jueguen).
+ */
+async function collectParticipantsWithStageTeams(
+  stages: TournamentStage[],
+  matches: Match[],
+  fetchPandaArray: (path: string) => Promise<any[] | null>,
+  officialStages?: { id?: number | string; name?: string }[]
+): Promise<TournamentParticipant[]> {
+  const map = new Map<string, TournamentParticipant>();
+  for (const p of extractParticipantsFromMatches(matches)) {
+    map.set(String(p.id ?? p.name), p);
+  }
+
+  const addStageTeams = async (
+    stageId: number | string,
+    targetStage?: TournamentStage
+  ): Promise<void> => {
+    const teams = await fetchPandaArray(`/tournaments/${stageId}/teams?per_page=100`);
+    if (!teams || teams.length === 0) return;
+    const stageKeys = new Set<string>();
+    const stageParticipants: TournamentParticipant[] = [];
+    for (const t of teams) {
+      if (!t || !t.name) continue;
+      const key = t.id !== undefined && t.id !== null ? String(t.id) : String(t.name);
+      if (stageKeys.has(key)) continue;
+      stageKeys.add(key);
+      const participant: TournamentParticipant = {
+        id: key,
+        name: t.name,
+        shortName: t.acronym || undefined,
+        logo: t.image_url || undefined,
+        region: t.location || undefined,
+      };
+      stageParticipants.push(participant);
+      if (!map.has(key)) map.set(key, participant);
+    }
+    if (targetStage && stageParticipants.length > 0) {
+      targetStage.participants = stageParticipants;
+    }
+    await sleep(120);
+  };
+
+  // Fases con cruces sin determinar (TBD): los partidos no bastan para saber
+  // qué equipos participan, pero la API sí conoce los equipos de la fase.
+  const stagesNeedingTeams = stages
+    .filter((stage) => {
+      const stageMatches = stage.matches || [];
+      if (stageMatches.length === 0) return false;
+      return stageMatches.some((m) => m.teamA.name === 'TBD' || m.teamB.name === 'TBD');
+    })
+    .slice(0, 6);
+
+  const fetchedStageIds = new Set<string>();
+  for (const stage of stagesNeedingTeams) {
+    const rawId = stage.matches?.[0]?.details?.stageId;
+    if (rawId === undefined || rawId === null) continue;
+    fetchedStageIds.add(String(rawId));
+    await addStageTeams(rawId, stage);
+  }
+
+  // Fases oficiales sin partidos listados (p. ej. una fase suiza cuya
+  // programación aún no está publicada): sus equipos también cuentan.
+  const officialWithoutMatches = (officialStages || [])
+    .filter((s) => s && s.id !== undefined && s.id !== null && !fetchedStageIds.has(String(s.id)))
+    .filter((s) => {
+      const stageId = String(s.id);
+      return !stages.some((stage) =>
+        (stage.matches || []).some((m) => String(m.details?.stageId) === stageId)
+      );
+    })
+    .slice(0, 4);
+
+  for (const stage of officialWithoutMatches) {
+    await addStageTeams(stage.id!);
+  }
+
+  return Array.from(map.values());
+}
+
 // ==========================================
 // FASES DEL TORNEO (PLAY-IN, SUIZA, GRUPOS, PLAYOFFS...)
 // ==========================================
@@ -1171,11 +1255,77 @@ export function buildSwissRounds(matches: Match[]): SwissRound[] {
 }
 
 /**
+ * ¿Los partidos de una fase se comportan como una fase suiza?
+ *
+ * Algunas APIs etiquetan la fase suiza con nombres genéricos ("Group Stage",
+ * "Stage 2"...) y la fase quedaba clasificada como grupos sin datos. La firma
+ * estructural de una suiza es que los cruces se emparejan por récord: ambos
+ * equipos llegan con el mismo balance victorias-derrotas. En una liguilla
+ * round-robin eso solo pasa en la primera ronda; aquí se exige que se cumpla
+ * en la mayoría de cruces y que ningún equipo juegue más de 5 series.
+ */
+function matchesLookLikeSwiss(matches: Match[]): boolean {
+  const real = matches.filter(
+    (m) =>
+      m.teamA?.name &&
+      m.teamB?.name &&
+      m.teamA.name !== 'TBD' &&
+      m.teamB.name !== 'TBD'
+  );
+  if (real.length < 6) return false;
+
+  const ordered = real
+    .slice()
+    .sort((a, b) => new Date(a.startTimeIso).getTime() - new Date(b.startTimeIso).getTime());
+
+  const wins = new Map<string, number>();
+  const losses = new Map<string, number>();
+  const played = new Map<string, number>();
+  let sameRecord = 0;
+
+  for (const m of ordered) {
+    const a = m.teamA.name;
+    const b = m.teamB.name;
+    const recordA = (wins.get(a) || 0) - (losses.get(a) || 0);
+    const recordB = (wins.get(b) || 0) - (losses.get(b) || 0);
+    if (recordA === recordB) sameRecord += 1;
+
+    played.set(a, (played.get(a) || 0) + 1);
+    played.set(b, (played.get(b) || 0) + 1);
+
+    if (m.status === 'FINISHED') {
+      const sA = Number(m.teamA.score) || 0;
+      const sB = Number(m.teamB.score) || 0;
+      if (sA > sB) {
+        wins.set(a, (wins.get(a) || 0) + 1);
+        losses.set(b, (losses.get(b) || 0) + 1);
+      } else if (sB > sA) {
+        wins.set(b, (wins.get(b) || 0) + 1);
+        losses.set(a, (losses.get(a) || 0) + 1);
+      }
+    }
+  }
+
+  const ratio = sameRecord / ordered.length;
+  const maxPlayed = Math.max(...played.values());
+  const teamCount = new Set(played.keys()).size;
+  return ratio >= 0.7 && maxPlayed <= 5 && teamCount >= 8;
+}
+
+/**
  * Construye una fase completa (tabla y/o cuadro) a partir de sus partidos reales.
  */
 function buildStage(id: string, rawName: string, matches: Match[]): TournamentStage {
-  const name = stageDisplayName(rawName || 'Fase');
-  const format = classifyStageFormat(rawName, matches);
+  let name = stageDisplayName(rawName || 'Fase');
+  let format = classifyStageFormat(rawName, matches);
+
+  // Fase suiza con nombre genérico ("Group Stage", "Stage 2"...): si los cruces
+  // se emparejan por récord, se trata como suiza y se muestra con sus rondas.
+  if ((format === 'GROUPS' || format === 'LEAGUE') && matchesLookLikeSwiss(matches)) {
+    format = 'SWISS';
+    if (/group|grupo|stage|fase/i.test(rawName || '')) name = 'Fase Suiza';
+  }
+
   const stage: TournamentStage = { id, name, format, matches };
 
   if (format === 'SWISS') {
@@ -2358,6 +2508,8 @@ export const TournamentService = {
     endAt?: string;
     leagueName?: string;
     leagueLogo?: string;
+    /** Series hermanas (play-in / fase principal / playoffs) de la misma edición. */
+    siblingSeriesIds?: (number | string)[];
   } | null> {
     const cleanToken = token.trim();
     if (!cleanToken) return null;
@@ -2629,14 +2781,19 @@ export const TournamentService = {
       const tId = (tournament.id || '').toLowerCase();
       const tRef = `${tId} ${tSlug} ${tName}`;
 
-      const wantsQualifier = /qualifier|clasificator|\blcq\b/.test(tRef);
+      const wantsQualifier = /qualifier|clasificator|\blcq\b|promotion|relegation|ascenso|descenso|ascension/.test(tRef);
       const isGameChangers = /game changers|gamechangers|\bgc\b/.test(tRef);
 
       let filtered = seriesCandidates.filter((s: any) => {
         const sText = `${s.full_name || ''} ${s.name || ''} ${s.slug || ''}`.toLowerCase();
 
-        // Descartar clasificatorios (open/closed/LCQ) salvo que el torneo sea un clasificatorio
-        if (!wantsQualifier && /qualifier|closed qual|open qual|\blcq\b|last chance/.test(sText)) {
+        // Descartar clasificatorios, promociones y descensos (open/closed/LCQ/
+        // promotion...) salvo que el torneo sea uno de ellos. Sin esto, la LFL
+        // 2026 podía resolver a "LFL 2027 Promotion" (se juega a finales de 2026).
+        if (
+          !wantsQualifier &&
+          /qualifier|closed qual|open qual|\blcq\b|last chance|\bpromotion\b|relegation|ascenso|descenso/.test(sText)
+        ) {
           return false;
         }
 
@@ -2736,6 +2893,58 @@ export const TournamentService = {
         timestamp: now,
       });
 
+      /**
+       * Clave normalizada de una serie sin año (para casar "EMEA Masters 2026
+       * Play-In" con "EMEA Masters").
+       */
+      const seriesKey = (value: string) =>
+        (value || '')
+          .toLowerCase()
+          .replace(/\b20\d{2}\b/g, ' ')
+          .replace(/[^a-z0-9]+/g, ' ')
+          .trim();
+
+      /**
+       * Series hermanas de la edición elegida que representan FASES del mismo
+       * evento (play-in, fase principal, playoffs...). Algunos torneos se
+       * publican en PandaScore como varias series separadas; sin unirlas, el
+       * detalle solo mostraba una parte del torneo.
+       */
+      const findSiblingSeriesIds = (chosen: any): (number | string)[] => {
+        const chosenText = `${chosen.full_name || ''} ${chosen.name || ''} ${chosen.slug || ''}`.toLowerCase();
+        // Nunca mezclar splits de una liga (Spring/Summer/...) entre sí.
+        if (/spring|summer|winter|autumn|split/.test(chosenText)) return [];
+
+        const referenceKeys = [rawName, tournament.slug, tournament.shortName]
+          .map((v) => seriesKey(v || ''))
+          .filter((v) => v.length >= 4);
+        if (referenceKeys.length === 0) return [];
+
+        const phaseRe = /play-?in|playoff|main event|group stage|swiss|finals?|last chance|gauntlet/i;
+        return filtered
+          .filter((s: any) => String(s.id) !== String(chosen.id))
+          .filter((s: any) => {
+            const text = `${s.full_name || ''} ${s.name || ''} ${s.slug || ''}`;
+            if (!phaseRe.test(text)) return false;
+            const base = seriesKey(text);
+            if (!referenceKeys.some((key) => base.includes(key))) return false;
+            if (targetYear !== undefined) {
+              const year = s.year || (s.begin_at ? new Date(s.begin_at).getFullYear() : undefined);
+              const namedYear = new RegExp(`(^|[^0-9])${targetYear}([^0-9]|$)`).test(text);
+              if (year !== targetYear && !namedYear) return false;
+            }
+            return true;
+          })
+          .slice(0, 2)
+          .map((s: any) => s.id);
+      };
+
+      const buildSeriesResult = (s: any) => {
+        const res = buildRes(s);
+        (res as any).siblingSeriesIds = findSiblingSeriesIds(s);
+        return res;
+      };
+
       // Prioridad absoluta: la serie fijada desde el partido es la edición exacta
       // que el usuario está viendo, así que gana a cualquier heurística de año.
       const matchPinnedSeries =
@@ -2743,7 +2952,7 @@ export const TournamentService = {
           ? filtered.find((s: any) => String(s.id) === String(effectivePinId))
           : undefined;
       if (matchPinnedSeries) {
-        const res = buildRes(matchPinnedSeries);
+        const res = buildSeriesResult(matchPinnedSeries);
         SERIES_RESOLUTION_CACHE.set(cacheKey, res);
         return res;
       }
@@ -2758,31 +2967,35 @@ export const TournamentService = {
       // o directamente en el nombre/slug de la serie.
       if (targetYear !== undefined) {
         const yearTag = new RegExp(`(^|[^0-9])${targetYear}([^0-9]|$)`);
+        const seriesText = (s: any) => `${s.full_name || ''} ${s.name || ''} ${s.slug || ''}`;
         const yearMatches = filtered.filter((s: any) => {
           if (s.year === targetYear) return true;
           if (s.begin_at && new Date(s.begin_at).getFullYear() === targetYear) return true;
-          return yearTag.test(`${s.full_name || ''} ${s.name || ''} ${s.slug || ''}`);
+          return yearTag.test(seriesText(s));
         });
 
         if (yearMatches.length > 0) {
+          // Prioridad dentro del año: las series que DECLARAN el año en su
+          // nombre ("LFL 2026") por delante de las que solo lo tocan por fecha
+          // (una promoción de finales de 2026 no es la temporada 2026).
+          const namedYearMatches = yearMatches.filter((s: any) => yearTag.test(seriesText(s)));
+          const pool = namedYearMatches.length > 0 ? namedYearMatches : yearMatches;
+
           if (splitMatch) {
             const splitWord = splitMatch[1].toLowerCase();
-            const splitMatchFound = yearMatches.find((s: any) => {
-              const nameLower = `${s.full_name || ''} ${s.name || ''} ${s.slug || ''}`.toLowerCase();
-              return nameLower.includes(splitWord);
-            });
+            const splitMatchFound = pool.find((s: any) => seriesText(s).toLowerCase().includes(splitWord));
             if (splitMatchFound) {
-              const res = buildRes(splitMatchFound);
+              const res = buildSeriesResult(splitMatchFound);
               SERIES_RESOLUTION_CACHE.set(cacheKey, res);
               return res;
             }
           }
-          const runningYear = yearMatches.find((s: any) => isRunningSeries(s));
-          const upcomingYear = yearMatches
+          const runningYear = pool.find((s: any) => isRunningSeries(s));
+          const upcomingYear = pool
             .filter((s: any) => s.begin_at && new Date(s.begin_at) > nowDate)
             .sort((a: any, b: any) => new Date(a.begin_at).getTime() - new Date(b.begin_at).getTime())[0];
-          const bestYear = runningYear || upcomingYear || yearMatches[0];
-          const res = buildRes(bestYear);
+          const bestYear = runningYear || upcomingYear || pool[0];
+          const res = buildSeriesResult(bestYear);
           SERIES_RESOLUTION_CACHE.set(cacheKey, res);
           return res;
         }
@@ -2794,7 +3007,7 @@ export const TournamentService = {
           .slice()
           .sort((a: any, b: any) => Number(b.id || 0) - Number(a.id || 0))[0];
         if (newestById) {
-          const res = buildRes(newestById);
+          const res = buildSeriesResult(newestById);
           SERIES_RESOLUTION_CACHE.set(cacheKey, res);
           return res;
         }
@@ -2802,13 +3015,13 @@ export const TournamentService = {
 
       // Prioridad 1: En curso (RUNNING: begin_at <= now <= end_at)
       if (pinnedSeries && isRunningSeries(pinnedSeries)) {
-        const res = buildRes(pinnedSeries);
+        const res = buildSeriesResult(pinnedSeries);
         SERIES_RESOLUTION_CACHE.set(cacheKey, res);
         return res;
       }
       const running = filtered.find((s: any) => isRunningSeries(s));
       if (running) {
-        const res = buildRes(running);
+        const res = buildSeriesResult(running);
         SERIES_RESOLUTION_CACHE.set(cacheKey, res);
         return res;
       }
@@ -2819,7 +3032,7 @@ export const TournamentService = {
         .sort((a: any, b: any) => new Date(a.begin_at).getTime() - new Date(b.begin_at).getTime());
       const upcoming = (pinnedSeries && new Date(pinnedSeries.begin_at) > nowDate ? pinnedSeries : undefined) || upcomingList[0];
       if (upcoming) {
-        const res = buildRes(upcoming);
+        const res = buildSeriesResult(upcoming);
         SERIES_RESOLUTION_CACHE.set(cacheKey, res);
         return res;
       }
@@ -2831,7 +3044,7 @@ export const TournamentService = {
         (pinnedSeries.year === currentYear ||
           (pinnedSeries.begin_at && new Date(pinnedSeries.begin_at).getFullYear() >= currentYear - 1));
       const recent = pinnedIsCurrent ? pinnedSeries : filtered[0];
-      const res = buildRes(recent);
+      const res = buildSeriesResult(recent);
       SERIES_RESOLUTION_CACHE.set(cacheKey, res);
       return res;
     } catch (e) {
@@ -2911,28 +3124,62 @@ export const TournamentService = {
         LAST_KNOWN_SERIES.set(tournament.id, { seriesId: resolved.seriesId, year });
       }
 
-      // 2. Fases internas del torneo (Group A, Play-In, Playoffs...)
-      const stageListRaw =
-        (await fetchPandaArray(`/series/${seriesId}/tournaments?per_page=50&sort=begin_at`)) || [];
+      // 2. Fases internas del torneo (Group A, Play-In, Playoffs...) de todas
+      //    las series de la edición: un evento puede repartirse en varias
+      //    series separadas (play-in, fase principal, playoffs).
+      const siblingSeriesIds = ((resolved as any)?.siblingSeriesIds || []).filter(
+        (id: any) => id !== undefined && id !== null && String(id) !== String(seriesId)
+      );
+      const seriesIds: (number | string)[] = [seriesId, ...siblingSeriesIds];
 
-      // 3. Cargar TODOS los partidos de la serie con paginación completa
-      const allRawMatches: any[] = [];
-      const PER_PAGE = 100;
-
-      for (let page = 1; page <= 5; page++) {
-        const pageData = await fetchPandaArray(
-          `/series/${seriesId}/matches?per_page=${PER_PAGE}&page=${page}&sort=begin_at`
-        );
-        if (!pageData || pageData.length === 0) break;
-        allRawMatches.push(...pageData);
-        if (pageData.length < PER_PAGE) break;
+      const stageListRaw: any[] = [];
+      const seenStageIds = new Set<string>();
+      for (const sid of seriesIds) {
+        const list =
+          (await fetchPandaArray(`/series/${sid}/tournaments?per_page=50&sort=begin_at`)) || [];
+        for (const stage of list) {
+          if (!stage || stage.id === undefined || stage.id === null) continue;
+          if (seenStageIds.has(String(stage.id))) continue;
+          seenStageIds.add(String(stage.id));
+          stageListRaw.push(stage);
+        }
       }
 
+      // 3. Cargar los partidos de todas las series de la edición con paginación
+      const PER_PAGE = 100;
+      const seriesSources: { seriesId: number | string; raw: any[] }[] = [];
+      const seenMatchIds = new Set<string>();
+
+      for (const sid of seriesIds) {
+        const raw: any[] = [];
+        // La serie principal puede tener cientos de partidos; las hermanas
+        // (play-in, playoffs) son cortas.
+        const maxPages = String(sid) === String(seriesId) ? 5 : 2;
+        for (let page = 1; page <= maxPages; page++) {
+          const pageData = await fetchPandaArray(
+            `/series/${sid}/matches?per_page=${PER_PAGE}&page=${page}&sort=begin_at`
+          );
+          if (!pageData || pageData.length === 0) break;
+          raw.push(...pageData);
+          if (pageData.length < PER_PAGE) break;
+        }
+        const unique = raw.filter((item: any) => {
+          if (!item || item.id === undefined || item.id === null) return false;
+          const key = String(item.id);
+          if (seenMatchIds.has(key)) return false;
+          seenMatchIds.add(key);
+          return true;
+        });
+        if (unique.length > 0) seriesSources.push({ seriesId: sid, raw: unique });
+      }
+
+      const allRawMatches = seriesSources.flatMap((s) => s.raw);
       if (allRawMatches.length === 0) return null;
 
       const matches: Match[] = [];
-      for (const item of allRawMatches) {
-        if (item.status === 'canceled' || item.status === 'postponed') continue;
+      for (const source of seriesSources) {
+        for (const item of source.raw) {
+          if (item.status === 'canceled' || item.status === 'postponed') continue;
 
         const oppA = item.opponents?.[0]?.opponent;
         const oppB = item.opponents?.[1]?.opponent;
@@ -2981,7 +3228,7 @@ export const TournamentService = {
           tier: tournament.tier,
           region: tournament.region,
           masterTournamentId: tournament.id,
-          seriesId,
+          seriesId: source.seriesId,
           teamA: {
             id: oppA?.id,
             name: nameA,
@@ -3005,6 +3252,7 @@ export const TournamentService = {
             bestOf: item.number_of_games || 3,
           },
         });
+        }
       }
 
       if (matches.length === 0) return null;
@@ -3090,7 +3338,12 @@ export const TournamentService = {
       if (bracket && lastTableStage?.standings) {
         applyBracketZonesToStandings(lastTableStage.standings, bracket);
       }
-      const participants = extractParticipantsFromMatches(matches);
+      const participants = await collectParticipantsWithStageTeams(
+        stageList,
+        matches,
+        fetchPandaArray,
+        stageListRaw
+      );
 
       return { matches, bracket, standings, stages: stageList, participants, resolvedSeries: resolved };
     } catch (e) {
@@ -3150,14 +3403,20 @@ export const TournamentService = {
     }
 
     const groups: StandingGroup[] = [];
+    // Las zonas de clasificación (Champions/Europa/descenso) son específicas de
+    // cada competición: solo se colorean las de LaLiga, no las de cualquier liga
+    // (Bundesliga, Serie A, Champions...) que tienen plazas distintas.
+    const isLaLiga = competitionCode.toUpperCase() === 'PD';
     for (const st of json.standings) {
       if (st.type === 'TOTAL' && Array.isArray(st.table)) {
         const rows: StandingRow[] = st.table.map((item: any) => {
           let zone: StandingRow['zone'] = undefined;
-          if (item.position <= 4) zone = 'champions';
-          else if (item.position === 5) zone = 'europa';
-          else if (item.position === 6) zone = 'conference';
-          else if (item.position >= st.table.length - 2) zone = 'relegation';
+          if (isLaLiga) {
+            if (item.position <= 4) zone = 'champions';
+            else if (item.position === 5) zone = 'europa';
+            else if (item.position === 6) zone = 'conference';
+            else if (item.position >= st.table.length - 2) zone = 'relegation';
+          }
 
           return {
             position: item.position,

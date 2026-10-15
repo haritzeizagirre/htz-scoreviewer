@@ -19,6 +19,8 @@ import {
   Calendar,
   SlidersHorizontal,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   MapPin,
 } from 'lucide-react-native';
 import {
@@ -96,6 +98,9 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
   const [tierFilter, setTierFilter] = useState<'TODOS' | TournamentTier>('TODOS');
   const [regionFilter, setRegionFilter] = useState<'TODOS' | MatchRegion>('TODOS');
   const [onlyFavorites, setOnlyFavorites] = useState(false);
+  // Gestor de favoritos guardados (lista las cadenas tal cual para poder quitar
+  // cualquier dato heredado aunque no exista en el catálogo).
+  const [showFavManager, setShowFavManager] = useState(false);
 
   // Online search state
   const [searchingOnline, setSearchingOnline] = useState(false);
@@ -259,7 +264,6 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
   // datos heredados del Hub). Sin esta sección no había forma de quitarlos.
   const ghostTeamFavorites = useMemo(() => {
     if (activeCatalogTab !== 'teams') return [] as string[];
-    if (sportFilter !== 'TODOS') return [] as string[];
     const q = searchQuery.toLowerCase().trim();
     return (favoriteTeams || []).filter((fav) => {
       const name = (fav || '').trim();
@@ -269,7 +273,10 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
         ScoreService.isTeamFavorite(t.name, t.shortName, [name], t.id)
       );
     });
-  }, [activeCatalogTab, favoriteTeams, searchQuery, sportFilter]);
+  }, [activeCatalogTab, favoriteTeams, searchQuery]);
+
+  // Cadenas de favoritos tal cual están guardadas (para el gestor).
+  const rawFavorites = activeCatalogTab === 'tournaments' ? favoriteTournaments : favoriteTeams;
 
   // Búsqueda en APIs remotas bajo demanda
   const handleSearchOnline = async () => {
@@ -277,8 +284,9 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
 
     const hasPanda = Boolean(pandaToken?.trim());
     const hasFootball = Boolean(footballToken?.trim());
-    const canSearch =
-      activeCatalogTab === 'tournaments' ? hasPanda || hasFootball : hasPanda;
+    // Los torneos se buscan en PandaScore y/o Football-Data; los equipos, en
+    // PandaScore (esports) y Football-Data (clubes de fútbol).
+    const canSearch = hasPanda || hasFootball;
 
     if (!canSearch) {
       // Sin tokens no se puede consultar: avisar en vez de dejar la pantalla igual.
@@ -298,7 +306,7 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
         setOnlineSearchCount(res.length);
         setOnlineSearchStatus(res.length > 0 ? 'results' : 'empty');
       } else {
-        const res = await ScoreService.searchOnlineTeams(searchQuery, pandaToken);
+        const res = await ScoreService.searchOnlineTeams(searchQuery, pandaToken, footballToken);
         setOnlineTeams(res);
         setOnlineSearchCount(res.length);
         setOnlineSearchStatus(res.length > 0 ? 'results' : 'empty');
@@ -430,6 +438,56 @@ export const CatalogExplorerView: React.FC<CatalogExplorerViewProps> = ({
             />
           ))}
         </ScrollView>
+      </View>
+
+      {/* Gestión de favoritos guardados: se listan las cadenas tal cual se
+          guardaron, para poder quitar cualquier dato heredado (p. ej. un equipo
+          guardado con otro nombre) aunque no exista en el catálogo. */}
+      <View style={styles.favManagerWrapper}>
+        <TouchableOpacity
+          style={styles.favManagerHeader}
+          onPress={() => setShowFavManager((v) => !v)}
+          activeOpacity={0.7}
+          accessibilityRole="button"
+          accessibilityLabel="Gestionar favoritos guardados"
+        >
+          <SlidersHorizontal size={14} color={htzTokens.colors.primary} />
+          <Text style={styles.favManagerTitle}>
+            {activeCatalogTab === 'tournaments' ? 'Torneos' : 'Equipos'} favoritos guardados (
+            {rawFavorites.length})
+          </Text>
+          {showFavManager ? (
+            <ChevronUp size={15} color={htzTokens.colors.outline} />
+          ) : (
+            <ChevronDown size={15} color={htzTokens.colors.outline} />
+          )}
+        </TouchableOpacity>
+        {showFavManager &&
+          (rawFavorites.length === 0 ? (
+            <Text style={styles.favManagerEmpty}>No hay favoritos guardados.</Text>
+          ) : (
+            <View style={styles.favChipsWrap}>
+              {rawFavorites.map((fav) => (
+                <View key={fav} style={styles.favChip}>
+                  <Text style={styles.favChipText} numberOfLines={1}>
+                    {fav}
+                  </Text>
+                  <TouchableOpacity
+                    onPress={() =>
+                      activeCatalogTab === 'tournaments'
+                        ? onToggleTournament(fav)
+                        : onToggleTeam(fav)
+                    }
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Quitar ${fav} de favoritos`}
+                  >
+                    <X size={12} color={htzTokens.colors.outline} />
+                  </TouchableOpacity>
+                </View>
+              ))}
+            </View>
+          ))}
       </View>
 
       {/* Lista de Resultados */}
@@ -755,6 +813,50 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderBottomWidth: 1,
     borderBottomColor: htzTokens.colors.outline,
+  },
+  favManagerWrapper: {
+    paddingHorizontal: 16,
+    paddingTop: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: htzTokens.colors.outline,
+  },
+  favManagerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 8,
+  },
+  favManagerTitle: {
+    flex: 1,
+    color: htzTokens.colors.onSurfaceVariant,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  favManagerEmpty: {
+    color: htzTokens.colors.outline,
+    fontSize: 12,
+    paddingBottom: 10,
+  },
+  favChipsWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    paddingBottom: 10,
+  },
+  favChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: htzTokens.colors.surfaceVariant,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    maxWidth: '100%',
+  },
+  favChipText: {
+    color: htzTokens.colors.onSurface,
+    fontSize: 11,
+    maxWidth: 220,
   },
   chipsScroll: {
     paddingHorizontal: 16,

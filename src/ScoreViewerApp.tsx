@@ -118,6 +118,10 @@ const DEFAULT_TOURNAMENTS = ScoreService.getDefaultFavoriteTournaments();
 // Marca de migración: los torneos Élite (Tier S) se añaden a favoritos una única vez.
 const ELITE_FAVORITES_MIGRATION_KEY = 'elite_favorites_seeded_v1';
 
+// Versión visible en la pestaña APIs: permite comprobar que la app instalada
+// incluye los últimos cambios (migraciones de favoritos, resolución de torneos...).
+const APP_VERSION = '2.1.1';
+
 const SPORT_OPTIONS: { id: 'TODOS' | SportCategory; label: string }[] = [
   { id: 'TODOS', label: 'Todos' },
   { id: 'FÚTBOL', label: 'Fútbol' },
@@ -477,10 +481,12 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
           await storage.set(ELITE_FAVORITES_MIGRATION_KEY, true);
         }
 
-        const normalizedTournaments = ScoreService.normalizeFavoriteTournaments(rawTournaments);
-        const normalizedTeams = ScoreService.normalizeFavoriteTeams(
+        const normalized = ScoreService.normalizeFavoriteLists(
+          rawTournaments,
           existingTeams.length > 0 ? existingTeams : DEFAULT_TEAMS
         );
+        const normalizedTournaments = normalized.tournaments;
+        const normalizedTeams = normalized.teams;
 
         // Migración de ajustes de alertas: rellena los eventos nuevos (p. ej.
         // rojas y goles anulados) sin pisar lo que el usuario ya tenía elegido.
@@ -2000,6 +2006,7 @@ export const ScoreViewerApp: React.FC<SubAppProps> = ({ storage }) => {
           >
             Guardar y Aplicar Claves
           </HtzButton>
+          <Text style={styles.appVersion}>Score Viewer Pro · v{APP_VERSION}</Text>
         </ScrollView>
         </View>
       )}
@@ -2121,6 +2128,12 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: htzTokens.colors.background,
+  },
+  appVersion: {
+    marginTop: 14,
+    textAlign: 'center',
+    color: htzTokens.colors.outline,
+    fontSize: 11,
   },
   header: {
     flexDirection: 'row',

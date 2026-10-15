@@ -612,6 +612,8 @@ export interface TournamentStage {
   /** Cruces ronda a ronda cuando la fase es suiza. */
   swissRounds?: SwissRound[];
   matches: Match[];
+  /** Equipos confirmados de la fase (aunque los cruces aún sean TBD). */
+  participants?: TournamentParticipant[];
 }
 
 export interface TournamentParticipant {
